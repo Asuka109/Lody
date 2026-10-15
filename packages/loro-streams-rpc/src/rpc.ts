@@ -92,6 +92,8 @@ import type {
   SessionHistoryWriteResponse,
   FilePreviewV3Request,
   FilePreviewV3Response,
+  FileReadRangeRequest,
+  FileReadRangeResponse,
 } from '@lody/shared';
 import {
   AgentConfigIdSchema,
@@ -103,6 +105,10 @@ import {
   FilePreviewV3ErrorCodeSchema,
   FilePreviewV3ErrorSchema,
   FilePreviewV3ResponseSchema,
+  FILE_READ_RANGE_PROTOCOL_VERSION,
+  FileReadRangeErrorCodeSchema,
+  FileReadRangeErrorSchema,
+  FileReadRangeResponseSchema,
   deriveCodeCollabV2ContentKeyBytes,
   deriveCodeCollabV2ContentKeyId,
   LocalProjectControlRequestSchema,
@@ -259,6 +265,9 @@ export const LoroStreamsRpcMethodSchema = z.enum([
   // File Preview v3. Deliberately outside the `code-collab/` namespace: it is a
   // plain read and must never activate Code Collab on the machine.
   'file/preview',
+  // Chunked download of a file File Preview v3 refuses as too large. Same
+  // namespace and the same reasons: a plain read, never Code Collab.
+  'file/read-range',
   'session/cancel',
   'session/live-status',
   'session/steer',
@@ -514,6 +523,12 @@ export const LoroFilePreviewRpcRequestSchema = BaseRpcRequestSchema.extend({
   params: CodeCollabV2RpcContentEnvelopeSchema,
 }).strict();
 
+/** File Read Range v1: the same envelope and owner binding as `file/preview`. */
+export const LoroFileReadRangeRpcRequestSchema = BaseRpcRequestSchema.extend({
+  method: z.literal('file/read-range'),
+  params: CodeCollabV2RpcContentEnvelopeSchema,
+}).strict();
+
 /**
  * Methods whose params/results travel inside the encrypted owner-session
  * envelope. Every encrypt, decrypt, and error-decode site must consult this —
@@ -523,6 +538,7 @@ export const LoroFilePreviewRpcRequestSchema = BaseRpcRequestSchema.extend({
 export const isOwnerScopedEncryptedRpcMethod = (method: string): boolean =>
   method.startsWith('code-collab/') ||
   method === 'file/preview' ||
+  method === 'file/read-range' ||
   method === 'session/history-read' ||
   method === 'session/history-write';
 
@@ -749,6 +765,7 @@ export const LoroStreamsRpcRequestSchema = z.discriminatedUnion('method', [
   LoroCodeCollabV2LspDefinitionRpcRequestSchema,
   LoroCodeCollabV2LspReferencesRpcRequestSchema,
   LoroFilePreviewRpcRequestSchema,
+  LoroFileReadRangeRpcRequestSchema,
   LoroSessionCancelRpcRequestSchema,
   LoroSessionLiveStatusRpcRequestSchema,
   LoroSessionSteerRpcRequestSchema,
@@ -893,6 +910,7 @@ export type LoroCodeCollabV2LspReferencesRpcRequest = z.infer<
   typeof LoroCodeCollabV2LspReferencesRpcRequestSchema
 >;
 export type LoroFilePreviewRpcRequest = z.infer<typeof LoroFilePreviewRpcRequestSchema>;
+export type LoroFileReadRangeRpcRequest = z.infer<typeof LoroFileReadRangeRpcRequestSchema>;
 export type LoroSessionCancelRpcRequest = z.infer<typeof LoroSessionCancelRpcRequestSchema>;
 export type LoroSessionLiveStatusRpcRequest = z.infer<typeof LoroSessionLiveStatusRpcRequestSchema>;
 export type LoroSessionTerminateRpcRequest = z.infer<typeof LoroSessionTerminateRpcRequestSchema>;
@@ -1599,6 +1617,7 @@ export type LoroMachineRpcResult =
   | CodeCollabV2RpcResponse
   | CodeCollabV2Error
   | FilePreviewV3Response
+  | FileReadRangeResponse
   | MachineProviderRateLimitsRefreshResponse
   | MachineAcpCapabilitiesRefreshResponse
   | MachineAcpAuthenticateResponse
@@ -1913,6 +1932,24 @@ const toLegacyRpcErrorResponse = (
     };
   }
 
+  if (method === 'file/read-range') {
+    const parsedData = FileReadRangeErrorSchema.safeParse(error.data);
+    if (parsedData.success) {
+      return {
+        ...parsedData.data,
+        message: parsedData.data.message ?? error.message,
+      };
+    }
+    const parsedCode = FileReadRangeErrorCodeSchema.safeParse(error.code);
+    return {
+      status: 'error',
+      v: FILE_READ_RANGE_PROTOCOL_VERSION,
+      code: parsedCode.success ? parsedCode.data : 'transient_io',
+      message: error.message,
+      retryable: error.code === 'request_failed' || error.code === 'machine_rpc_unavailable',
+    };
+  }
+
   if (method.startsWith('code-collab/')) {
     const parsedData = CodeCollabV2ErrorSchema.safeParse(error.data);
     if (parsedData.success) {
@@ -2119,6 +2156,10 @@ const parseRpcSuccessResult = async (
     if (response.method === 'file/preview') {
       const previewParsed = FilePreviewV3ResponseSchema.safeParse(decrypted);
       return previewParsed.success ? previewParsed.data : null;
+    }
+    if (response.method === 'file/read-range') {
+      const rangeParsed = FileReadRangeResponseSchema.safeParse(decrypted);
+      return rangeParsed.success ? rangeParsed.data : null;
     }
     const parsed = CodeCollabV2RpcResponseSchema.safeParse(decrypted);
     return parsed.success ? parsed.data : null;
@@ -3240,6 +3281,29 @@ export class LoroStreamsMachineRpcClient {
     })) as FilePreviewV3Response | null;
   }
 
+  /**
+   * File Read Range v1: one bounded byte range of a file, for downloads that
+   * File Preview v3 refuses. Only send it to a machine advertising
+   * `fileReadRange`.
+   */
+  async requestFileReadRange(
+    options: Omit<FileReadRangeRequest, 'v'> & { ownerSessionId?: string; timeoutMs?: number }
+  ): Promise<FileReadRangeResponse | null> {
+    return (await this.sendRequest({
+      method: 'file/read-range',
+      timeoutMs: options.timeoutMs ?? 30_000,
+      ownerSessionId: options.ownerSessionId ?? options.sessionId,
+      params: {
+        v: FILE_READ_RANGE_PROTOCOL_VERSION,
+        sessionId: options.sessionId,
+        path: options.path,
+        offset: options.offset,
+        length: options.length,
+        ...(options.revision === undefined ? {} : { revision: options.revision }),
+      },
+    })) as FileReadRangeResponse | null;
+  }
+
   async requestCodeCollabRefreshText(
     options: CodeCollabV2RefreshTextRequest & { ownerSessionId?: string; timeoutMs?: number }
   ): Promise<CodeCollabV2RefreshTextResponse | CodeCollabV2Error | null> {
@@ -3759,6 +3823,12 @@ export class LoroStreamsMachineRpcClient {
           params: FilePreviewV3Request;
         }
       | {
+          method: 'file/read-range';
+          timeoutMs: number;
+          ownerSessionId: string;
+          params: FileReadRangeRequest;
+        }
+      | {
           method: 'session/preview-create';
           timeoutMs: number;
           params: {
@@ -3838,6 +3908,7 @@ export class LoroStreamsMachineRpcClient {
       args.method === 'code-collab/lsp-definition' ||
       args.method === 'code-collab/lsp-references' ||
       args.method === 'file/preview' ||
+      args.method === 'file/read-range' ||
       args.method === 'session/history-read' ||
       args.method === 'session/history-write'
         ? args.ownerSessionId
@@ -4120,6 +4191,13 @@ export class LoroStreamsMachineRpcClient {
           };
           break;
         case 'file/preview':
+          request = {
+            ...envelope,
+            method: args.method,
+            params: await encryptCodeCollabV2RpcPayload(args.ownerSessionId, args.params),
+          };
+          break;
+        case 'file/read-range':
           request = {
             ...envelope,
             method: args.method,

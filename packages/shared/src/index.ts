@@ -115,6 +115,7 @@ export * from './workspace-route';
 export * from './layout';
 export * from './code-collab';
 export * from './file-preview';
+export * from './file-read-range';
 export * from './machine-flock';
 export * from './workspace-mcp';
 export * from './agent-role';

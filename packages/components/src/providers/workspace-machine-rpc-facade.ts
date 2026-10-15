@@ -20,6 +20,7 @@ import {
   type WorkspaceMcpServerMeta,
   DEFAULT_PREVIEW_CREATE_TIMEOUT_MS,
   getServerNow,
+  machineSupportsFileReadRangeProtocol,
   machineSupportsLocalFileResourcesProtocol,
   machineSupportsPiExtensions,
   machineSupportsSubagentCancellation,
@@ -53,6 +54,9 @@ import {
   type FilePreviewV3Response,
   FILE_PREVIEW_PROTOCOL_VERSION,
   filePreviewV3Error,
+  type FileReadRangeRequest,
+  type FileReadRangeResponse,
+  fileReadRangeError,
   type LocalMachineRpcRequest,
   type LocalMachineRpcResult,
   type LocalProjectControlRequest,
@@ -264,6 +268,57 @@ export function createWorkspaceMachineRpcFacade(deps: WorkspaceMachineRpcFacadeD
     });
     if (!response) throw new Error('Roost session history write request timed out.');
     return response;
+  };
+
+  /**
+   * File Read Range v1: one bounded byte range, for downloading a file File
+   * Preview v3 refuses. Always resolves; a transport failure is a typed error.
+   * Remote machines only: a same-machine Electron target is opened on the host,
+   * and its path must never fall through to the Streams plane.
+   */
+  const requestFileReadRange = async (
+    machineId: MachineId,
+    request: Omit<FileReadRangeRequest, 'v'>,
+    options?: CodeCollabRequestOptions
+  ): Promise<FileReadRangeResponse> => {
+    try {
+      const isElectron = typeof window !== 'undefined' && window.__LODY_ELECTRON__;
+      if (isElectron && (await resolveMachineTargetPlane(machineId)) !== 'cloud') {
+        return fileReadRangeError('transient_io', {
+          message: 'Files on this machine open on the host instead of downloading.',
+          path: request.path,
+          retryable: false,
+        });
+      }
+      const protocolCapabilities = await deps.getMachineProtocolCapabilities(machineId);
+      if (!machineSupportsFileReadRangeProtocol({ protocolCapabilities })) {
+        return fileReadRangeError('transient_io', {
+          message: 'This machine does not support file downloads. Update the machine.',
+          path: request.path,
+          retryable: false,
+        });
+      }
+      const client = await getMachineRpcClient(machineId);
+      const result = await client.requestFileReadRange({
+        ...request,
+        ownerSessionId: options?.ownerSessionId,
+        timeoutMs: options?.timeoutMs ?? 30_000,
+      });
+      return (
+        result ??
+        fileReadRangeError('transient_io', {
+          message: 'File download request timed out.',
+          path: request.path,
+          retryable: true,
+        })
+      );
+    } catch (error) {
+      return fileReadRangeError('transient_io', {
+        message: error instanceof Error ? error.message : String(error),
+        path: request.path,
+        retryable: true,
+      });
+    }
   };
 
   /**
@@ -1580,6 +1635,7 @@ export function createWorkspaceMachineRpcFacade(deps: WorkspaceMachineRpcFacadeD
     requestSessionHistoryRead,
     requestSessionHistoryWrite,
     requestFilePreview,
+    requestFileReadRange,
     requestLocalCodeCollabFileIndex,
     requestCodeCollabOpenText,
     requestCodeCollabRefreshText,

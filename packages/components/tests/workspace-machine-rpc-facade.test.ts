@@ -470,6 +470,107 @@ describe('createWorkspaceMachineRpcFacade', () => {
     expect(getMachineRpcClient).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, {}, { fileReadRange: 0 }])(
+    'never sends a range read to a machine without the file read range protocol (%j)',
+    async (protocolCapabilities) => {
+      const getMachineRpcClient = vi.fn();
+      const facade = createWorkspaceMachineRpcFacade({
+        workspaceId,
+        getMachineProtocolCapabilities: async () => protocolCapabilities,
+        targetRouter: {
+          getPlaneForMachine: () => 'cloud',
+          resolvePlaneForMachine: async () => 'cloud',
+        },
+        getMachineRpcClient,
+      });
+
+      await expect(
+        facade.requestFileReadRange(remoteMachineId, {
+          sessionId,
+          path: 'renders/flyover.mp4',
+          offset: 0,
+          length: 4096,
+        })
+      ).resolves.toMatchObject({
+        status: 'error',
+        code: 'transient_io',
+        retryable: false,
+        message: expect.stringContaining('does not support file downloads'),
+      });
+      expect(getMachineRpcClient).not.toHaveBeenCalled();
+    }
+  );
+
+  it('reads a remote range through the cloud client with the owner session', async () => {
+    const requestFileReadRange = vi.fn(async () => ({
+      status: 'ok' as const,
+      v: 1 as const,
+      path: 'renders/flyover.mp4',
+      revision: 'rev-1',
+      sizeBytes: 3,
+      offset: 0,
+      data: 'AQID',
+      rawBytes: 3,
+    }));
+    const facade = createWorkspaceMachineRpcFacade({
+      workspaceId,
+      getMachineProtocolCapabilities: async () => CURRENT_MACHINE_PROTOCOL_CAPABILITIES,
+      targetRouter: {
+        getPlaneForMachine: () => 'cloud',
+        resolvePlaneForMachine: async () => 'cloud',
+      },
+      getMachineRpcClient: async () => ({ requestFileReadRange }) as never,
+    });
+
+    await expect(
+      facade.requestFileReadRange(
+        remoteMachineId,
+        { sessionId, path: 'renders/flyover.mp4', offset: 0, length: 4096 },
+        { ownerSessionId: 'session-parent' }
+      )
+    ).resolves.toMatchObject({ status: 'ok', data: 'AQID' });
+    expect(requestFileReadRange).toHaveBeenCalledWith({
+      sessionId,
+      path: 'renders/flyover.mp4',
+      offset: 0,
+      length: 4096,
+      ownerSessionId: 'session-parent',
+      timeoutMs: 30_000,
+    });
+  });
+
+  it.each([
+    ['routed to this machine', async () => 'local' as const],
+    [
+      'with routing unresolved',
+      async (): Promise<'local'> => {
+        throw new Error('workspace_target_identity_timeout');
+      },
+    ],
+  ])('never downloads an Electron file over Streams %s', async (_label, resolvePlane) => {
+    vi.stubGlobal('window', { __LODY_ELECTRON__: true, ipc: { invoke: vi.fn() } });
+    const getMachineRpcClient = vi.fn();
+    const facade = createWorkspaceMachineRpcFacade({
+      workspaceId,
+      getMachineProtocolCapabilities: async () => CURRENT_MACHINE_PROTOCOL_CAPABILITIES,
+      targetRouter: {
+        getPlaneForMachine: () => null,
+        resolvePlaneForMachine: resolvePlane,
+      },
+      getMachineRpcClient,
+    });
+
+    await expect(
+      facade.requestFileReadRange(localMachineId, {
+        sessionId,
+        path: '/tmp/local.mp4',
+        offset: 0,
+        length: 4096,
+      })
+    ).resolves.toMatchObject({ status: 'error', code: 'transient_io' });
+    expect(getMachineRpcClient).not.toHaveBeenCalled();
+  });
+
   it('uses the local bridge for a file-index snapshot without creating a cloud client', async () => {
     const invoke = vi.fn(async () => ({
       ok: true as const,

@@ -306,7 +306,8 @@ describe('video preview lifecycle', () => {
   it('shows file actions on decode failure and resets the error for a replacement source', async () => {
     let copied = false;
     let shared = false;
-    const render = async (url: string) => {
+    let downloaded = false;
+    const render = async (url: string, downloading = false) => {
       await act(async () =>
         root.render(
           createElement(SessionFileBinaryPreview, {
@@ -319,6 +320,10 @@ describe('video preview lifecycle', () => {
               onShare: () => {
                 shared = true;
               },
+              onDownload: () => {
+                downloaded = true;
+              },
+              downloading,
             },
           })
         )
@@ -334,8 +339,15 @@ describe('video preview lifecycle', () => {
     await act(async () => {
       buttons.find((button) => button.textContent?.includes('Copy file path'))!.click();
       buttons.find((button) => button.textContent?.includes('Share file'))!.click();
+      buttons.find((button) => button.textContent?.includes('Download file'))!.click();
     });
-    expect(copied && shared).toBe(true);
+    expect(copied && shared && downloaded).toBe(true);
+    // A download in flight holds its button so a second click cannot start another.
+    await render('blob:authorized-first', true);
+    const pending = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Download file')
+    );
+    expect(pending?.disabled).toBe(true);
     await render('blob:authorized-second');
     expect(container.textContent).not.toContain('Video unavailable');
     expect(container.querySelector('video')!.getAttribute('src')).toBe('blob:authorized-second');

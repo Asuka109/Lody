@@ -357,8 +357,11 @@ function UnsupportedEncodingStory() {
 // bridge, so the story passes the same callbacks by hand.
 function FileErrorActionsStory({
   openTarget,
+  download,
 }: {
   readonly openTarget?: 'browser' | 'default-app';
+  /** The remote machine serves `file/read-range`; `'pending'` is a download in flight. */
+  readonly download?: 'ready' | 'pending';
 }) {
   return (
     <div className="w-[420px] rounded-md border border-border bg-background p-4">
@@ -367,6 +370,7 @@ function FileErrorActionsStory({
         reason="text-too-large"
         fileActions={{
           onCopyPath: fn(),
+          ...(download ? { onDownload: fn(), downloading: download === 'pending' } : {}),
           ...(openTarget
             ? {
                 localHost: {
@@ -499,4 +503,30 @@ export const TooLargeOnAnotherMachine: StoryObj<typeof FileErrorActionsStory> = 
     },
   },
   render: () => <FileErrorActionsStory />,
+};
+
+export const TooLargeDownloadableFromAnotherMachine: StoryObj<typeof FileErrorActionsStory> = {
+  parameters: {
+    layout: 'centered',
+    docs: {
+      description: {
+        story:
+          'A remote machine that serves ranged reads: Download file leads and fetches the whole file in bounded ranges, however large the preview found it; Copy file path recedes.',
+      },
+    },
+  },
+  render: () => <FileErrorActionsStory download="ready" />,
+};
+
+export const TooLargeDownloadInFlight: StoryObj<typeof FileErrorActionsStory> = {
+  parameters: {
+    layout: 'centered',
+    docs: {
+      description: {
+        story:
+          'While that download runs, its button holds a spinner and ignores clicks; progress and Cancel live in the toast.',
+      },
+    },
+  },
+  render: () => <FileErrorActionsStory download="pending" />,
 };

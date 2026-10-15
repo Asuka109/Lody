@@ -76,6 +76,8 @@ import type {
   CodeCollabV2SaveTextResponse,
   FilePreviewV3Request,
   FilePreviewV3Response,
+  FileReadRangeRequest,
+  FileReadRangeResponse,
 } from '@lody/shared';
 import type { LocalProjectGitStateRpcResponse } from '@lody/loro-streams-rpc';
 import type { WorkspaceWriter } from '../providers/workspace-writer';
@@ -422,6 +424,15 @@ export type WorkspaceRuntime = {
     request: Omit<FilePreviewV3Request, 'v'>,
     options?: { timeoutMs?: number; ownerSessionId?: SessionId | string }
   ) => Promise<FilePreviewV3Response | LocalFilePreviewResource>;
+  /**
+   * File Read Range v1: one bounded byte range of a remote machine's file, for
+   * downloads. Always resolves (transport failures come back as `status: 'error'`).
+   */
+  requestFileReadRange: (
+    machineId: MachineId,
+    request: Omit<FileReadRangeRequest, 'v'>,
+    options?: { timeoutMs?: number; ownerSessionId?: SessionId | string }
+  ) => Promise<FileReadRangeResponse>;
   /**
    * Electron-only initial Code Collab tree/current-All-Changes snapshot. This
    * never falls back to the cloud Machine RPC transport.

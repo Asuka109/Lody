@@ -13,18 +13,26 @@ import { toast } from '@/lib/toast';
 import { useTranslation } from 'react-i18next';
 import {
   getMachineFlockLocalProjects,
+  machineSupportsFileReadRangeProtocol,
   type CodeCollabContentUnavailableReason,
+  type FileReadRangeErrorCode,
   type SessionMeta,
 } from '@lody/shared';
 import { getMachineMetaByIdAtomFamily } from '@/atoms';
 import { localHomeDirAtom, localMachineIdAtom } from '@/atoms/local-probe';
+import { activeWorkspaceRuntimeAtom } from '@/atoms/runtime';
 import { useMachineFlockRows } from '@/hooks/use-machine-flock-rows';
 import { usePostHog } from '@posthog/react';
 import { writeTextToClipboard } from '@/lib/clipboard';
 import { capturePostHogEvent, getAnalyticsFileKind } from '@/lib/posthog-analytics';
-import { downloadBytesAsFile, getDownloadFileName } from '@/lib/download-file';
+import { downloadBytesAsFile, downloadPartsAsFile, getDownloadFileName } from '@/lib/download-file';
 import { isNativeAppShell } from '@/lib/native-platform';
 import { shareFileBytesNatively } from '@/lib/session-file-native-save';
+import { formatFileSize } from '@/lib/session-file-presentation';
+import {
+  downloadSessionFileInRanges,
+  type SessionFileRangeReader,
+} from '@/lib/session-file-range-download';
 import { getIpcServices } from '@/lib/electron-ipc-client';
 import type {
   FileWorkspaceBinarySnapshot,
@@ -134,9 +142,10 @@ export type SessionFileActions = {
     snapshot?: FileWorkspaceBinarySnapshot
   ) => SessionFileErrorActions | undefined;
   /**
-   * Context-menu actions for a path an agent wrote in Markdown. Unlike the
-   * file-tree menu, this deliberately never offers download/share remotely:
-   * outside the owning local Electron machine it is Copy Path only.
+   * Context-menu actions for a path an agent wrote in Markdown. Outside the
+   * owning local Electron machine it is Copy file path, plus Download when the
+   * session's machine serves `file/read-range` — never the preview-read
+   * fallback, and never a native share.
    */
   readonly buildMarkdownLinkMenuItems: (href: string) => readonly MarkdownAgentFileLinkMenuItem[];
   /**
@@ -170,6 +179,13 @@ export function useSessionFileActions({
   const postHog = usePostHog();
   const nativeShell = isNativeAppShell();
   const exportingRef = useRef(false);
+  const runtime = useAtomValue(activeWorkspaceRuntimeAtom);
+  // Synchronous de-duplication; the state mirror below only drives rendering.
+  const rangeDownloadsRef = useRef(new Set<string>());
+  const [rangeDownloadPaths, setRangeDownloadPaths] = useState<ReadonlySet<string>>(
+    () => new Set()
+  );
+  const rangeDownloadToastSeqRef = useRef(0);
   // `session/file_action`: one event per user-invoked file action. Only the
   // extension bucket leaves the client, never the path.
   const trackFileAction = useCallback(
@@ -198,6 +214,9 @@ export function useSessionFileActions({
 
   const isElectronRenderer = typeof window !== 'undefined' && window.__LODY_ELECTRON__ === true;
   const isLocalMachine = Boolean(localMachineId) && session?.machineId === localMachineId;
+  // A boolean, not the meta object: menu items handed to memoized tree rows must
+  // not change identity on every machine-meta update.
+  const machineServesRanges = machineSupportsFileReadRangeProtocol(sessionMachine);
   const platform = normalizeSessionFileActionPlatform(
     typeof window === 'undefined' ? undefined : window.__LODY_PLATFORM__?.os
   );
@@ -493,6 +512,33 @@ export function useSessionFileActions({
     };
   }, [availableLauncherIds, launcherCandidates, pathLauncherPreference.selectedLauncherId]);
 
+  // The chunked download transport. Remote only: a same-machine Electron session
+  // reaches the real file through the host actions, and its paths must never
+  // ride the Streams plane. Not in the native shell either, whose share sheet
+  // exports bytes it must hold whole; it keeps the bounded preview export.
+  const sessionId = session?.id;
+  const sessionMachineId = session?.machineId;
+  const ownerSessionId = session?.parentSessionId ?? session?.id;
+  const readRange = useMemo<SessionFileRangeReader | null>(() => {
+    if (!sessionId || !sessionMachineId || !ownerSessionId || !runtime) return null;
+    if (nativeShell || !machineServesRanges || (isElectronRenderer && isLocalMachine)) return null;
+    return async (request) =>
+      await runtime.requestFileReadRange(
+        sessionMachineId,
+        { sessionId, ...request },
+        { ownerSessionId }
+      );
+  }, [
+    isElectronRenderer,
+    isLocalMachine,
+    machineServesRanges,
+    nativeShell,
+    ownerSessionId,
+    runtime,
+    sessionId,
+    sessionMachineId,
+  ]);
+
   // ONE decision for both halves, and `hasHostPath` is the real thing: an
   // Electron renderer on the owning machine still cannot reach a shell until
   // that machine's path metadata resolves. Deriving it from `localHost` was
@@ -505,8 +551,9 @@ export function useSessionFileActions({
         isLocalMachine,
         hasHostPath: workspacePath !== null,
         hasFileProvider: Boolean(fileProvider),
+        hasRangeDownload: readRange !== null,
       }),
-    [fileProvider, isElectronRenderer, isLocalMachine, workspacePath]
+    [fileProvider, isElectronRenderer, isLocalMachine, readRange, workspacePath]
   );
 
   const localHost = useMemo<SessionFileLocalHostActionSet | null>(() => {
@@ -573,18 +620,95 @@ export function useSessionFileActions({
     t,
   ]);
 
-  const download = useMemo(() => {
-    if (!session || !availability.download || !fileProvider) return null;
+  /**
+   * Download through `file/read-range`: any size up to the machine's ceiling,
+   * with a progress toast that can cancel it. One download per path per surface.
+   */
+  const downloadInRanges = useCallback(
+    (filePath: string) => {
+      if (!readRange || rangeDownloadsRef.current.has(filePath)) return;
+      const publishPaths = () => setRangeDownloadPaths(new Set(rangeDownloadsRef.current));
+      rangeDownloadsRef.current.add(filePath);
+      publishPaths();
+      const controller = new AbortController();
+      rangeDownloadToastSeqRef.current += 1;
+      const toastId = `session-file-download:${rangeDownloadToastSeqRef.current}:${filePath}`;
+      const title = t('sessions.fileActions.downloading', 'Downloading {{name}}…', {
+        name: getDownloadFileName(filePath),
+      });
+      const showProgress = (receivedBytes: number, totalBytes: number | null) => {
+        toast(title, {
+          id: toastId,
+          duration: 0,
+          ...(totalBytes === null
+            ? {}
+            : { description: `${formatFileSize(receivedBytes)} / ${formatFileSize(totalBytes)}` }),
+          action: {
+            label: t('common.cancel', 'Cancel'),
+            onClick: () => {
+              controller.abort();
+              toast.dismiss(toastId);
+            },
+          },
+        });
+      };
+      const reportFailure = (code: FileReadRangeErrorCode | 'invalid_response') => {
+        if (code === 'file_not_found') {
+          toast.error(t('sessions.fileActions.fileMissing', 'That file no longer exists.'));
+        } else if (code === 'too_large') {
+          toast.error(
+            t(
+              'sessions.fileActions.downloadTooLarge',
+              'This file is too large to download from here. Open it on the machine that owns it.'
+            )
+          );
+        } else if (code === 'file_changed') {
+          toast.error(
+            t(
+              'sessions.fileActions.downloadFileChanged',
+              'The file changed while it was downloading. Try again.'
+            )
+          );
+        } else {
+          toast.error(t('sessions.fileActions.downloadFailed', 'Could not download that file.'));
+        }
+      };
+      showProgress(0, null);
+      void (async () => {
+        try {
+          const result = await downloadSessionFileInRanges({
+            path: filePath,
+            readRange,
+            signal: controller.signal,
+            onProgress: ({ receivedBytes, totalBytes }) => showProgress(receivedBytes, totalBytes),
+          });
+          toast.dismiss(toastId);
+          if (result.status === 'ok') downloadPartsAsFile(result.path, result.parts);
+          else if (result.status === 'error') reportFailure(result.code);
+        } catch {
+          toast.dismiss(toastId);
+          reportFailure('transient_io');
+        } finally {
+          rangeDownloadsRef.current.delete(filePath);
+          publishPaths();
+        }
+      })();
+    },
+    [readRange, t]
+  );
 
-    // KNOWN CEILING: this reads through the preview API, which answers in ONE
-    // bounded response (10 MiB text / 5 MiB binary remotely). So the download
-    // covers ordinary files and cannot cover the oversized ones — the very
-    // files whose error card sent the user looking for a way out. Saying that
-    // is the point of `downloadTooLarge`: a generic "could not download" reads
-    // as a glitch worth retrying. A real answer for those needs a ranged or
-    // streamed transfer, which is a Machine RPC protocol change (new method
-    // plus a negotiated `protocolCapabilities` key, never inferred from the CLI
-    // version) rather than a client-side fix.
+  const download = useMemo(() => {
+    if (!session || !availability.download) return null;
+    if (readRange) return downloadInRanges;
+    if (!fileProvider) return null;
+
+    // KNOWN CEILING of this fallback, used only when the machine does not serve
+    // `file/read-range` (or in the native shell): it reads through the preview
+    // API, which answers in ONE bounded response (10 MiB text / 5 MiB binary
+    // remotely). So it cannot cover the oversized files whose error card sent
+    // the user looking for a way out. Saying that is the point of
+    // `downloadTooLarge`: a generic "could not download" reads as a glitch
+    // worth retrying.
     const reportUnavailable = (reason: CodeCollabContentUnavailableReason | 'no-bytes') => {
       if (reason === 'deleted') {
         toast.error(t('sessions.fileActions.fileMissing', 'That file no longer exists.'));
@@ -645,7 +769,7 @@ export function useSessionFileActions({
         }
       })();
     };
-  }, [availability.download, fileProvider, nativeShell, session, t]);
+  }, [availability.download, downloadInRanges, fileProvider, nativeShell, readRange, session, t]);
 
   const buildErrorActions = useCallback(
     (
@@ -670,6 +794,17 @@ export function useSessionFileActions({
                 sharing,
               }
             : {}),
+          // Only the ranged transport: the card is shown for exactly the files a
+          // preview read refused, so the preview-read fallback would always fail.
+          ...(readRange
+            ? {
+                onDownload: () => {
+                  trackFileAction('download', 'file_fallback', trimmed);
+                  downloadInRanges(trimmed);
+                },
+                downloading: rangeDownloadPaths.has(trimmed),
+              }
+            : {}),
         };
       return {
         onCopyPath,
@@ -687,7 +822,19 @@ export function useSessionFileActions({
         },
       };
     },
-    [copyPath, download, localHost, nativeShell, resolveHostPath, session, sharing, trackFileAction]
+    [
+      copyPath,
+      download,
+      downloadInRanges,
+      localHost,
+      nativeShell,
+      rangeDownloadPaths,
+      readRange,
+      resolveHostPath,
+      session,
+      sharing,
+      trackFileAction,
+    ]
   );
 
   const resolveMarkdownLinkFilePath = useCallback(
@@ -713,7 +860,7 @@ export function useSessionFileActions({
         {
           kind: 'action',
           id: 'copy-path',
-          label: t('sessions.fileActions.copyPath', 'Copy Path'),
+          label: t('sessions.fileViewer.copyPath', 'Copy file path'),
           icon: Copy,
           run: () => {
             trackFileAction('copy_path', 'md_link_context_menu', filePath);
@@ -721,6 +868,21 @@ export function useSessionFileActions({
           },
         },
       ];
+      // Ranged transport only, never the preview-read fallback: agents link
+      // build artifacts and renders, the files a single preview read refuses.
+      // `readRange` is never set for a same-machine Electron session.
+      if (readRange) {
+        items.push({
+          kind: 'action',
+          id: 'download',
+          label: t('sessions.fileActions.download', 'Download file'),
+          icon: Download,
+          run: () => {
+            trackFileAction('download', 'md_link_context_menu', filePath);
+            downloadInRanges(filePath);
+          },
+        });
+      }
 
       // The exact same local-host gate protects every path handed to Electron.
       // A remote agent's href can still be copied, but must never reach this
@@ -787,7 +949,9 @@ export function useSessionFileActions({
     [
       copyPath,
       availableEditorLaunchers,
+      downloadInRanges,
       localHost,
+      readRange,
       resolveHostPath,
       resolveMarkdownLinkFilePath,
       runEditorAction,

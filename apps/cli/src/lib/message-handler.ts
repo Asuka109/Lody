@@ -3335,6 +3335,7 @@ export class MessageHandler {
           await this.writeSessionHistoryForRpc(sessionId, operation, payload),
         resolveCodeCollabOwnerSessionId: this.resolveCodeCollabV2OwnerSessionId,
         previewFile: async (request) => await this.filePreviewService.previewFile(request),
+        readFileRange: async (request) => await this.filePreviewService.readFileRange(request),
         openCodeCollabText: async (request) => await this.codeCollabV2Service.openText(request),
         refreshCodeCollabText: async (request) =>
           await this.codeCollabV2Service.refreshText(request),

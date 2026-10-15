@@ -2110,6 +2110,146 @@ describe('LoroStreamsMachineRpcServer', () => {
     server.stop();
   });
 
+  it('serves file/read-range through the owner-scoped encrypted envelope', async () => {
+    const fake = createFakeStreamClient();
+    const readFileRange = vi.fn(async () => ({
+      status: 'ok' as const,
+      v: 1 as const,
+      path: 'renders/flyover.mp4',
+      revision: 'rev-1',
+      sizeBytes: 9,
+      offset: 4,
+      data: 'AQID',
+      rawBytes: 3,
+    }));
+    const server = new LoroStreamsMachineRpcServer({
+      logger: createSilentLogger(),
+      workspaceId: 'workspace-1' as WorkspaceId,
+      machineId: 'machine-1' as MachineId,
+      streamClient: fake.streamClient,
+      getMachineStatus: vi.fn(),
+      refreshMachineAcpCapabilities: vi.fn(),
+      resolveCodeCollabOwnerSessionId: vi.fn(
+        async (): Promise<SessionId> => 'session-parent' as SessionId
+      ),
+      readFileRange,
+    });
+
+    fake.pushBatch({
+      messages: [
+        {
+          jsonrpc: '2.0',
+          id: 'req-1',
+          method: 'file/read-range',
+          rpcVersion: '1',
+          machineId: 'machine-1',
+          workspaceId: 'workspace-1',
+          replyTo: 'workspace-1:rpc:res:machine-1',
+          sentAt: Date.now(),
+          expiresAt: Date.now() + 5000,
+          params: await encryptCodeCollabV2RpcPayload('session-parent', {
+            v: 1,
+            sessionId: 'session-child',
+            path: 'renders/flyover.mp4',
+            offset: 4,
+            length: 4096,
+            revision: 'rev-1',
+          }),
+        },
+      ],
+      nextOffset: '1',
+      cursor: 'cursor-1',
+      upToDate: true,
+    });
+
+    await server.start();
+
+    await vi.waitFor(() => {
+      expect(fake.appended).toHaveLength(1);
+    });
+
+    expect(readFileRange).toHaveBeenCalledWith({
+      v: 1,
+      sessionId: 'session-child',
+      path: 'renders/flyover.mp4',
+      offset: 4,
+      length: 4096,
+      revision: 'rev-1',
+    });
+    const response = fake.appended[0]?.value as { result: unknown };
+    // File bytes are user content: they never leave the machine in the clear.
+    expect(JSON.stringify(response.result)).not.toContain('AQID');
+    await expect(
+      decryptCodeCollabV2RpcPayload(
+        response.result as CodeCollabV2RpcContentEnvelope,
+        'session-parent'
+      )
+    ).resolves.toMatchObject({ status: 'ok', offset: 4, data: 'AQID', rawBytes: 3 });
+
+    server.stop();
+  });
+
+  it('rejects a file/read-range request whose envelope owner is not the session owner', async () => {
+    const fake = createFakeStreamClient();
+    const readFileRange = vi.fn();
+    const server = new LoroStreamsMachineRpcServer({
+      logger: createSilentLogger(),
+      workspaceId: 'workspace-1' as WorkspaceId,
+      machineId: 'machine-1' as MachineId,
+      streamClient: fake.streamClient,
+      getMachineStatus: vi.fn(),
+      refreshMachineAcpCapabilities: vi.fn(),
+      resolveCodeCollabOwnerSessionId: vi.fn(
+        async (): Promise<SessionId> => 'session-parent' as SessionId
+      ),
+      readFileRange,
+    });
+
+    fake.pushBatch({
+      messages: [
+        {
+          jsonrpc: '2.0',
+          id: 'req-1',
+          method: 'file/read-range',
+          rpcVersion: '1',
+          machineId: 'machine-1',
+          workspaceId: 'workspace-1',
+          replyTo: 'workspace-1:rpc:res:machine-1',
+          sentAt: Date.now(),
+          expiresAt: Date.now() + 5000,
+          params: await encryptCodeCollabV2RpcPayload('session-wrong-owner', {
+            v: 1,
+            sessionId: 'session-child',
+            path: 'renders/flyover.mp4',
+            offset: 0,
+            length: 4096,
+          }),
+        },
+      ],
+      nextOffset: '1',
+      cursor: 'cursor-1',
+      upToDate: true,
+    });
+
+    await server.start();
+
+    await vi.waitFor(() => {
+      expect(fake.appended).toHaveLength(1);
+    });
+
+    expect(readFileRange).not.toHaveBeenCalled();
+    const response = fake.appended[0]?.value as { error: { code: string; data?: unknown } };
+    expect(response.error.code).toBe('permission_denied');
+    await expect(
+      decryptCodeCollabV2RpcPayload(
+        response.error.data as CodeCollabV2RpcContentEnvelope,
+        'session-wrong-owner'
+      )
+    ).resolves.toMatchObject({ status: 'error', v: 1, code: 'permission_denied' });
+
+    server.stop();
+  });
+
   it('rejects a file/preview request whose envelope owner is not the session owner', async () => {
     const workspaceId = 'workspace-1' as WorkspaceId;
     const machineId = 'machine-1' as MachineId;

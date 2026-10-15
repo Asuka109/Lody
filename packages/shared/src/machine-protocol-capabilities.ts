@@ -1,3 +1,5 @@
+import { FILE_READ_RANGE_PROTOCOL_VERSION } from './file-read-range';
+
 /**
  * Durable protocols understood by a Machine daemon.
  *
@@ -26,6 +28,7 @@ export const MACHINE_PROTOCOL_CAPABILITIES = {
   preparedSessionInput: 'preparedSessionInput',
   sessionInputAttachments: 'sessionInputAttachments',
   localFileResources: 'localFileResources',
+  fileReadRange: 'fileReadRange',
   acpProtocolAuthentication: 'acpProtocolAuthentication',
   previewControl: 'previewControl',
   iosSimulator: 'iosSimulator',
@@ -137,6 +140,7 @@ export const CURRENT_MACHINE_PROTOCOL_CAPABILITIES: MachineProtocolCapabilities 
   [MACHINE_PROTOCOL_CAPABILITIES.sessionInputAttachments]:
     SESSION_INPUT_ATTACHMENTS_PROTOCOL_VERSION,
   [MACHINE_PROTOCOL_CAPABILITIES.localFileResources]: LOCAL_FILE_RESOURCES_PROTOCOL_VERSION,
+  [MACHINE_PROTOCOL_CAPABILITIES.fileReadRange]: FILE_READ_RANGE_PROTOCOL_VERSION,
   [MACHINE_PROTOCOL_CAPABILITIES.acpProtocolAuthentication]: ACP_PROTOCOL_AUTHENTICATION_VERSION,
   [MACHINE_PROTOCOL_CAPABILITIES.previewControl]: PREVIEW_CONTROL_PROTOCOL_VERSION,
   [MACHINE_PROTOCOL_CAPABILITIES.iosSimulator]: IOS_SIMULATOR_PROTOCOL_VERSION,
@@ -273,6 +277,17 @@ export function machineSupportsLocalFileResourcesProtocol(
     machine,
     MACHINE_PROTOCOL_CAPABILITIES.localFileResources,
     LOCAL_FILE_RESOURCES_PROTOCOL_VERSION
+  );
+}
+
+/** Whether the target daemon serves `file/read-range`, the chunked remote file download. */
+export function machineSupportsFileReadRangeProtocol(
+  machine: MachineProtocolCapabilityCarrier | null | undefined
+): boolean {
+  return machineSupportsProtocolCapability(
+    machine,
+    MACHINE_PROTOCOL_CAPABILITIES.fileReadRange,
+    FILE_READ_RANGE_PROTOCOL_VERSION
   );
 }
 

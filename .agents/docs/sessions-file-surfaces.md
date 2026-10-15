@@ -55,14 +55,22 @@ this page is the full text of the rules summarised there.
   preference) — lives in the optional `localHost` half, resolved only for
   Electron + the file's machine being this one. `Download file` is the exact
   complement: offered only where `localHost` is absent, because with the real
-  file one keystroke away a copy in ~/Downloads is a decoy. It reads through
-  `openFile`, i.e. the preview API's ONE bounded response, so it cannot serve a
-  file past those limits — exactly the files whose error card sent the user
-  looking. That is a known ceiling, not a silent failure: say so
+  file one keystroke away a copy in ~/Downloads is a decoy. When the session's
+  machine advertises `fileReadRange` and the viewer is neither same-machine
+  Electron nor native mobile, it reads the file through `file/read-range` in
+  bounded ranges (`lib/session-file-range-download.ts`): one range in flight,
+  every range pinned to the first range's revision, a cancellable progress
+  toast, and nothing saved on failure. Only that transport puts Download on the
+  error/notice card (first, as the leading action; Copy file path then recedes
+  to `ghost` as it does beside the local-host and share actions) and the
+  Markdown-link menu. Without
+  it the menus fall back to `openFile`, the preview API's ONE bounded response,
+  which cannot serve a file past those limits — exactly the files the card
+  shows, so the card offers no download then. That fallback says so
   (`sessions.fileActions.downloadTooLarge`), because a generic "could not
-  download" reads as a glitch worth retrying. Lifting it needs a ranged or
-  streamed Machine RPC method behind a negotiated `protocolCapabilities` key,
-  never a client-side retry loop. Never promote a
+  download" reads as a glitch worth retrying. See the
+  [ranged download note](../notes/implemented/feature/2026-10-15-remote-ranged-file-download.md).
+  Never promote a
   local-host action to a surface that cannot perform it, and never re-derive
   that decision per surface — `lib/session-file-actions.ts` states it once.
   Native mobile exports those same complete bytes through the Capacitor cache
@@ -83,8 +91,8 @@ this page is the full text of the rules summarised there.
   menu expose that identity as two copy actions — `Copy relative path` always,
   and `Copy absolute path` only once the workspace root resolves or the path is
   already absolute; an unresolved root leaves the relative copy alone. The
-  file-error card and the Markdown-link menu keep one `Copy file path` /
-  `Copy Path` action, which copies the absolute path when it resolves and
+  file-error card and the Markdown-link menu keep one `Copy file path`
+  action, which copies the absolute path when it resolves and
   otherwise the path as held. `SessionFileErrorState` owns which error kinds
   get the row (`offersFileActions`): only too-large and unsupported, never a
   missing, denied, or offline file where every button would fail. That card has

@@ -6,15 +6,18 @@
 //    owning machine". While that machine's path metadata loads, the local-host
 //    actions can only fail — and the download that would have worked must not
 //    be hidden behind them.
-// 2. The remote download reads through the preview API's ONE bounded response,
-//    so it cannot serve a file past those limits — exactly the file whose error
-//    card sent the user looking. It must SAY that: a generic "could not
-//    download" reads as a glitch worth retrying.
+// 2. A machine that serves `file/read-range` downloads any file up to its
+//    ceiling in bounded ranges, one revision or nothing. Without it, the
+//    fallback reads through the preview API's ONE bounded response, so it cannot
+//    serve a file past those limits — exactly the file whose error card sent the
+//    user looking. It must SAY that: a generic "could not download" reads as a
+//    glitch worth retrying.
 
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { atom, Provider } from 'jotai';
+import { atom, createStore, Provider } from 'jotai';
+import type { FileReadRangeRequest, FileReadRangeResponse, MachineMeta } from '@lody/shared';
 
 // The machine's own path metadata: `null` is the state right after mount, when
 // the Flock rows for that machine have not arrived yet.
@@ -32,6 +35,20 @@ vi.mock('../src/lib/session-file-native-save', () => ({
 vi.mock('../src/atoms/local-probe', () => ({
   localHomeDirAtom: atom(() => localHomeDir),
   localMachineIdAtom: atom(() => localMachineId),
+}));
+
+// Only the transport the ranged download needs; `null` is "no workspace runtime".
+type RangeRuntime = {
+  requestFileReadRange: (
+    machineId: string,
+    request: Omit<FileReadRangeRequest, 'v'>,
+    options?: { ownerSessionId?: string }
+  ) => Promise<FileReadRangeResponse>;
+};
+let rangeRuntime: RangeRuntime | null = null;
+vi.mock('../src/atoms/runtime', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/atoms/runtime')>()),
+  activeWorkspaceRuntimeAtom: atom(() => rangeRuntime),
 }));
 
 // `../src/atoms` is deliberately NOT mocked: it is a barrel half the graph
@@ -66,16 +83,21 @@ vi.mock('../src/lib/electron-ipc-client', () => ({
 
 const toastError = vi.fn();
 const toastSuccess = vi.fn();
+const toastShow = vi.fn();
+const toastDismiss = vi.fn();
 vi.mock('@/lib/toast', () => ({
-  toast: {
+  toast: Object.assign((...args: unknown[]) => toastShow(...args), {
     error: (...args: unknown[]) => toastError(...args),
     success: (...args: unknown[]) => toastSuccess(...args),
-  },
+    dismiss: (...args: unknown[]) => toastDismiss(...args),
+  }),
 }));
 
 const downloadBytesAsFile = vi.fn();
+const downloadPartsAsFile = vi.fn();
 vi.mock('../src/lib/download-file', () => ({
   downloadBytesAsFile: (...args: unknown[]) => downloadBytesAsFile(...args),
+  downloadPartsAsFile: (...args: unknown[]) => downloadPartsAsFile(...args),
   getDownloadFileName: (path: string) => path,
 }));
 
@@ -83,7 +105,8 @@ vi.mock('../src/hooks/use-machine-flock-rows', () => ({
   useMachineFlockRows: () => ({}),
 }));
 
-import type { SessionMeta } from '@lody/shared';
+import { getMachineRoomId, type MachineId, type SessionMeta } from '@lody/shared';
+import { machineMetaCacheAtom } from '../src/atoms/doc-meta';
 import {
   useSessionFileActions,
   type SessionFileActions,
@@ -463,7 +486,7 @@ describe('local-host actions vs a resolvable host path', () => {
     expect(actions.menuItems.some((item) => item.id === 'reveal')).toBe(false);
   });
 
-  it('offers only Copy Path for Markdown links outside the local Electron boundary', async () => {
+  it('offers only Copy file path for Markdown links outside the local Electron boundary', async () => {
     localMachineId = 'another-machine';
     const actions = await resolveActions();
     const items = actions.buildMarkdownLinkMenuItems('/tmp/build/Lody.zip:366');
@@ -614,5 +637,221 @@ describe('local-host actions vs a resolvable host path', () => {
       await Promise.resolve();
     });
     expect(writeTextToClipboard).toHaveBeenLastCalledWith(artifact);
+  });
+});
+
+describe('ranged remote download (file/read-range)', () => {
+  let root: Root | undefined;
+  let container: HTMLDivElement | undefined;
+  const FILE = 'renders/flyover.mp4';
+  const BYTES = Uint8Array.from({ length: 10 }, (_, index) => 250 - index);
+
+  beforeEach(async () => {
+    await initI18n('en');
+    toastError.mockClear();
+    toastShow.mockClear();
+    toastDismiss.mockClear();
+    downloadBytesAsFile.mockClear();
+    downloadPartsAsFile.mockClear();
+    nativeShell = false;
+    localMachineId = null;
+    localHomeDir = '/home/dev';
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root?.unmount();
+      });
+      root = undefined;
+    }
+    container?.remove();
+    container = undefined;
+    rangeRuntime = null;
+    delete (window as { __LODY_ELECTRON__?: boolean }).__LODY_ELECTRON__;
+  });
+
+  /** A machine serving `bytes` four at a time, the way `file/read-range` clamps. */
+  const serveRanges = (bytes: Uint8Array) =>
+    vi.fn(
+      async (
+        _machineId: string,
+        request: Omit<FileReadRangeRequest, 'v'>
+      ): Promise<FileReadRangeResponse> => {
+        const chunk = bytes.subarray(request.offset, request.offset + Math.min(4, request.length));
+        return {
+          status: 'ok',
+          v: 1,
+          path: request.path,
+          revision: 'rev-1',
+          sizeBytes: bytes.byteLength,
+          offset: request.offset,
+          data: Buffer.from(chunk).toString('base64'),
+          rawBytes: chunk.byteLength,
+        };
+      }
+    );
+
+  const mount = async ({
+    servesRanges = true,
+    openFile = vi.fn(),
+  }: { servesRanges?: boolean; openFile?: () => Promise<FileWorkspaceOpenResult> } = {}) => {
+    const store = createStore();
+    store.set(machineMetaCacheAtom, {
+      [getMachineRoomId(session.machineId as MachineId)]: {
+        id: session.machineId,
+        protocolCapabilities: servesRanges ? { fileReadRange: 1 } : {},
+      } as unknown as MachineMeta,
+    });
+    const current: { actions?: SessionFileActions } = {};
+    const fileProvider = { openFile };
+    function Probe() {
+      current.actions = useSessionFileActions({ session, fileProvider });
+      return null;
+    }
+    await act(async () => {
+      root?.render(createElement(Provider, { store }, createElement(Probe)));
+    });
+    const actions = () => {
+      if (!current.actions) throw new Error('hook did not render');
+      return current.actions;
+    };
+    return { actions, openFile };
+  };
+
+  it('downloads the whole file in ranges of one revision, never through the preview read', async () => {
+    const requestFileReadRange = serveRanges(BYTES);
+    rangeRuntime = { requestFileReadRange };
+    const { actions, openFile } = await mount();
+
+    await act(async () => {
+      actions().download?.(FILE);
+    });
+    await vi.waitFor(() => expect(downloadPartsAsFile).toHaveBeenCalledTimes(1));
+
+    const [savedPath, parts] = downloadPartsAsFile.mock.calls[0] as [string, Uint8Array[]];
+    expect(savedPath).toBe(FILE);
+    expect(Uint8Array.from(parts.flatMap((part) => [...part]))).toEqual(BYTES);
+    expect(openFile).not.toHaveBeenCalled();
+    expect(
+      requestFileReadRange.mock.calls.map(([machineId, request, options]) => [
+        machineId,
+        request.offset,
+        request.revision,
+        options?.ownerSessionId,
+      ])
+    ).toEqual([
+      ['machine-remote', 0, undefined, 'session-download'],
+      ['machine-remote', 4, 'rev-1', 'session-download'],
+      ['machine-remote', 8, 'rev-1', 'session-download'],
+    ]);
+    // Progress is visible while it runs and gone once the browser has the file.
+    expect(toastShow).toHaveBeenLastCalledWith(
+      `Downloading ${FILE}…`,
+      expect.objectContaining({ description: '10 B / 10 B' })
+    );
+    expect(toastDismiss).toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it('offers Download beside Copy file path on the card and the Markdown menu', async () => {
+    rangeRuntime = { requestFileReadRange: serveRanges(BYTES) };
+    const { actions } = await mount();
+
+    expect(actions().buildErrorActions(FILE)?.onDownload).toBeTypeOf('function');
+    const items = actions().buildMarkdownLinkMenuItems(FILE);
+    expect(items.map((item) => [item.id, item.label])).toEqual([
+      ['copy-path', 'Copy file path'],
+      ['download', 'Download file'],
+    ]);
+  });
+
+  it('keeps Download off the card and the Markdown menu when the machine cannot serve ranges', async () => {
+    rangeRuntime = { requestFileReadRange: serveRanges(BYTES) };
+    const { actions } = await mount({ servesRanges: false });
+
+    // The preview-read fallback would fail for exactly the files the card shows.
+    expect(actions().buildErrorActions(FILE)?.onDownload).toBeUndefined();
+    expect(
+      actions()
+        .buildMarkdownLinkMenuItems(FILE)
+        .map((item) => item.id)
+    ).toEqual(['copy-path']);
+  });
+
+  it('never sends a same-machine Electron path over the Streams plane', async () => {
+    (window as { __LODY_ELECTRON__?: boolean }).__LODY_ELECTRON__ = true;
+    localMachineId = session.machineId;
+    // The host path has not resolved, so the shell actions are not offered yet.
+    localHomeDir = null;
+    const requestFileReadRange = serveRanges(BYTES);
+    rangeRuntime = { requestFileReadRange };
+    const { actions } = await mount();
+
+    expect(actions().buildErrorActions(FILE)?.onDownload).toBeUndefined();
+    expect(
+      actions()
+        .buildMarkdownLinkMenuItems(FILE)
+        .map((item) => item.id)
+    ).toEqual(['copy-path']);
+    expect(requestFileReadRange).not.toHaveBeenCalled();
+  });
+
+  it('refuses to stitch a file that changed between ranges', async () => {
+    const served = serveRanges(BYTES);
+    rangeRuntime = {
+      requestFileReadRange: async (machineId, request, options) =>
+        request.offset === 0
+          ? await served(machineId, request, options)
+          : { status: 'error', v: 1, code: 'file_changed' },
+    };
+    const { actions } = await mount();
+
+    await act(async () => {
+      actions().buildErrorActions(FILE)?.onDownload?.();
+    });
+    await vi.waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith(
+        'The file changed while it was downloading. Try again.'
+      )
+    );
+    expect(downloadPartsAsFile).not.toHaveBeenCalled();
+  });
+
+  it('cancels from the progress toast without saving a partial file', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const served = serveRanges(BYTES);
+    rangeRuntime = {
+      requestFileReadRange: async (machineId, request, options) => {
+        await held;
+        return await served(machineId, request, options);
+      },
+    };
+    const { actions } = await mount();
+
+    await act(async () => {
+      actions().buildErrorActions(FILE)?.onDownload?.();
+    });
+    expect(actions().buildErrorActions(FILE)?.downloading).toBe(true);
+    const progress = toastShow.mock.calls.at(-1)?.[1] as {
+      id: string;
+      action: { label: string; onClick: () => void };
+    };
+    expect(progress.action.label).toBe('Cancel');
+
+    await act(async () => {
+      progress.action.onClick();
+      release();
+    });
+    await vi.waitFor(() => expect(actions().buildErrorActions(FILE)?.downloading).toBe(false));
+    expect(toastDismiss).toHaveBeenCalledWith(progress.id);
+    expect(downloadPartsAsFile).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
   });
 });

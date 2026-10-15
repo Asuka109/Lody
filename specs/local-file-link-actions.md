@@ -79,14 +79,15 @@ reads are bounded to 25 MiB before importing the format engine. Oversized or
 unreadable Office files show the existing file-action notice. Provider
 authorization and transfer limits still apply before viewer loading.
 
-Right-clicking an assistant Markdown file link always offers Copy Path. On an
+Right-clicking an assistant Markdown file link always offers Copy file path. On an
 Electron renderer whose session belongs to this machine and whose workspace path
 has resolved, its menu additionally offers Open File with the OS default app,
 Open in the editor selected in the session header, Open with the other available
 configured path launchers, and Reveal in Finder (or the host's file manager).
 The path handed to the clipboard or OS excludes a Markdown line/column suffix; ordinary left
 click retains that suffix for in-app preview navigation. Browser, mobile, remote,
-and unresolved-local contexts offer Copy Path only.
+and unresolved-local contexts offer Copy file path, plus Download file where the
+ranged remote download below is available.
 Each rendered conversation surface resolves that capability from its own Session.
 An opened, child, or side Session never inherits its opener's workspace, machine,
 or native file actions.
@@ -97,7 +98,28 @@ the system share sheet, preserving the filename extension. Copy file path remain
 available. Repeated exports are suppressed while one is pending; dismissal is not
 an error, and cache cleanup is best-effort after handoff or failure. Existing
 remote preview limits still apply (5 MiB binary); oversized or unavailable content
-is not shared. This does not introduce a large-file transfer protocol.
+is not shared; native mobile does not use the ranged download below.
+
+A file the remote preview refuses as too large can still be downloaded. When the
+session's machine advertises the `fileReadRange` protocol and the viewer is not
+a same-machine Electron session or native mobile, Download file appears first,
+above Copy file path, in the file-error and binary notice cards, in the Files tree and
+side-panel More menus, and in the assistant Markdown file-link menu. The client
+reads the file in bounded ranges of at most 4 MiB, one at a time, and saves it
+once complete. Files over 256 MiB are refused with a message to open them on the
+owning machine. Every range is authorized exactly like a remote preview: the same
+owner-session binding, encrypted transport and allowed roots, and it never
+activates Code Collab. The first range fixes the file's revision; if the file
+changes before the last range, the download fails instead of saving a mixture of
+two versions. A progress notification shows the transferred size and can cancel
+the download; nothing partial is saved. Machines without the protocol keep the
+bounded preview-read download in the file menus only, and the notice card and
+Markdown menu offer no download there, because it would fail for exactly the
+files they show.
+
+Open question: the 4 MiB range and 256 MiB file budgets follow the proven 5 MiB
+preview response, not a measurement of the hosted Streams gateway, and every
+range of a large download passes through that service.
 
 Failures identify the action and give a next step for unresolved paths, missing
 files, access denial, unavailable desktop IPC, or editor startup failures. A local
@@ -133,3 +155,5 @@ gain filesystem access. Ordinary web image URLs keep their existing behavior.
 - [Office viewer entry](../packages/components/src/components/sessions/session-file-office-preview.tsx)
 - [CSV/TSV viewer](../packages/components/src/components/sessions/session-file-csv-preview.tsx)
 - [Shared file actions](../packages/components/src/hooks/use-session-file-actions.ts)
+- [Ranged download protocol](../packages/shared/src/file-read-range.ts) and
+  [machine-side reader](../apps/cli/src/lib/file-preview/file-preview-service.ts)
