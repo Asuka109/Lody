@@ -38,6 +38,7 @@ export const MACHINE_PROTOCOL_CAPABILITIES = {
   sessionInputAcceptance: 'sessionInputAcceptance',
   sessionInputDispatch: 'sessionInputDispatch',
   sessionCollaborationControl: 'sessionCollaborationControl',
+  codeCollabIgnoredEntries: 'codeCollabIgnoredEntries',
 } as const;
 
 export const OPERATION_INBOX_PROTOCOL_VERSION = 2;
@@ -65,6 +66,7 @@ export const ACP_CAPABILITY_REFRESH_CACHE_PROTOCOL_VERSION = 1;
 export const SESSION_HISTORY_PROTOCOL_VERSION = 2;
 export const SESSION_INPUT_ACCEPTANCE_PROTOCOL_VERSION = 1;
 export const SESSION_INPUT_DISPATCH_PROTOCOL_VERSION = 1;
+export const CODE_COLLAB_IGNORED_ENTRIES_PROTOCOL_VERSION = 1;
 
 type MachineProtocolCapabilityCarrier = {
   protocolCapabilities?: MachineProtocolCapabilities;
@@ -147,7 +149,20 @@ export const CURRENT_MACHINE_PROTOCOL_CAPABILITIES: MachineProtocolCapabilities 
   [MACHINE_PROTOCOL_CAPABILITIES.sessionHistory]: SESSION_HISTORY_PROTOCOL_VERSION,
   [MACHINE_PROTOCOL_CAPABILITIES.sessionInputAcceptance]: SESSION_INPUT_ACCEPTANCE_PROTOCOL_VERSION,
   [MACHINE_PROTOCOL_CAPABILITIES.sessionInputDispatch]: SESSION_INPUT_DISPATCH_PROTOCOL_VERSION,
+  [MACHINE_PROTOCOL_CAPABILITIES.codeCollabIgnoredEntries]:
+    CODE_COLLAB_IGNORED_ENTRIES_PROTOCOL_VERSION,
 };
+
+/** Whether the daemon answers the per-viewer `code-collab/list-ignored` file-tree read. */
+export function machineSupportsCodeCollabIgnoredEntries(
+  machine: MachineProtocolCapabilityCarrier | null | undefined
+): boolean {
+  return machineSupportsProtocolCapability(
+    machine,
+    MACHINE_PROTOCOL_CAPABILITIES.codeCollabIgnoredEntries,
+    CODE_COLLAB_IGNORED_ENTRIES_PROTOCOL_VERSION
+  );
+}
 
 export function machineSupportsSessionInputDispatch(
   machine: MachineProtocolCapabilityCarrier | null | undefined

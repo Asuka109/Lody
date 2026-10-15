@@ -75,6 +75,12 @@ export type FileWorkspaceProviderState = {
   readonly message?: string;
 };
 
+/** One directory's ignored-name listing; see `FileWorkspaceProvider.listIgnoredEntries`. */
+export type FileWorkspaceIgnoredEntries = {
+  readonly entries: readonly FileWorkspaceProviderEntry[];
+  readonly truncated: boolean;
+};
+
 export type FileWorkspaceHostLivenessSnapshot = {
   readonly status: 'online' | 'expired';
   readonly ageMs?: number;
@@ -86,6 +92,12 @@ export interface FileWorkspaceProvider {
   listFiles(): Promise<readonly FileWorkspaceProviderEntry[]>;
   subscribeFiles?(callback: (files: readonly FileWorkspaceProviderEntry[]) => void): () => void;
   initializeDirectory?(directoryId: string): Promise<void>;
+  /**
+   * Names the shared index leaves out (Git-ignored), read for this viewer only.
+   * `''` is the workspace root, whose listing may reach any depth; any other path
+   * lists that directory's direct children. Rejects when the read is unavailable.
+   */
+  listIgnoredEntries?(directoryPath: string): Promise<FileWorkspaceIgnoredEntries>;
   searchFiles(query: string): Promise<readonly FileWorkspaceProviderEntry[]>;
   getFile(pathOrFileId: string): Promise<FileWorkspaceProviderEntry | null>;
   openFile(pathOrFileId: string): Promise<FileWorkspaceOpenResult>;

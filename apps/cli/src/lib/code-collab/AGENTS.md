@@ -70,6 +70,8 @@ File-by-file responsibilities: [README.md](README.md).
   when the target machine resolves it inside the session workspace root. Absolute
   paths outside that root remain `invalid_path`; never rely on frontend path stripping
   as the filesystem access boundary.
+- `list-ignored` is a per-viewer, names-only read: never owner state, Flock or watch
+  ownership. Check the real path's containment; keep messages path-free.
 - Native `fs.watch` handles must stay in `workspace-watch-worker-core.ts`; the main CLI
   Worker owns only subscriptions, refresh timers, scans, file-index/All Changes state,
   and Flock publication. The child receives canonical roots over private IPC only and

@@ -3347,6 +3347,8 @@ export class MessageHandler {
           await this.codeCollabV2Service.openTurnDiff(request),
         initCodeCollabDirectory: async (request) =>
           await this.codeCollabV2Service.initDirectory(request),
+        listCodeCollabIgnored: async (request) =>
+          await this.codeCollabV2Service.listIgnored(request),
         getCodeCollabLspDefinition: async () => await this.codeCollabV2Service.lspDefinition(),
         getCodeCollabLspReferences: async () => await this.codeCollabV2Service.lspReferences(),
         controlIosSimulator: async ({ proof, responseKey, ...request }) =>
@@ -6550,6 +6552,9 @@ export class MessageHandler {
       case 'code-collab/init-directory':
         await assertOwner(request.params.sessionId as SessionId);
         return await this.codeCollabV2Service.initDirectory(request.params);
+      case 'code-collab/list-ignored':
+        await assertOwner(request.params.sessionId as SessionId);
+        return await this.codeCollabV2Service.listIgnored(request.params);
       case 'code-collab/lsp-definition':
         await assertOwner(request.params.sessionId as SessionId);
         return await this.codeCollabV2Service.lspDefinition();

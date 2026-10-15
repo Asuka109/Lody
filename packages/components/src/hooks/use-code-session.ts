@@ -1,7 +1,8 @@
 import type { FileTreeItem } from '@lody/shared';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { buildFileTreeFromPaths } from '../lib/file-tree';
 import type {
+  FileWorkspaceIgnoredEntries,
   FileWorkspaceProvider,
   FileWorkspaceProviderEntry,
 } from '../lib/file-workspace-provider';
@@ -148,3 +149,129 @@ export const useFileWorkspaceTree = (
 };
 
 export const useSessionFileProviderTree = useFileWorkspaceTree;
+
+type IgnoredFileTreeListings = {
+  readonly entries: ReadonlyMap<string, readonly FileWorkspaceProviderEntry[]>;
+  /** Directories whose newest listing failed or came back truncated. */
+  readonly notices: ReadonlyMap<string, 'failed' | 'truncated'>;
+};
+
+const EMPTY_IGNORED_LISTINGS: IgnoredFileTreeListings = { entries: new Map(), notices: new Map() };
+
+// Memory-only, like `file-tree-view-state`: switching side-panel tabs unmounts the
+// tree, and coming back must not flash the ignored rows away until a reload.
+const MAX_TRACKED_IGNORED_LISTINGS = 32;
+const ignoredListingsByKey = new Map<string, IgnoredFileTreeListings>();
+
+const readIgnoredListings = (key: string | undefined): IgnoredFileTreeListings =>
+  (key === undefined ? undefined : ignoredListingsByKey.get(key)) ?? EMPTY_IGNORED_LISTINGS;
+
+const writeIgnoredListings = (key: string | undefined, listings: IgnoredFileTreeListings) => {
+  if (key === undefined) return;
+  ignoredListingsByKey.delete(key);
+  ignoredListingsByKey.set(key, listings);
+  const oldestKey = ignoredListingsByKey.keys().next().value;
+  if (ignoredListingsByKey.size > MAX_TRACKED_IGNORED_LISTINGS && oldestKey !== undefined) {
+    ignoredListingsByKey.delete(oldestKey);
+  }
+};
+
+export function clearIgnoredFileTreeListings(): void {
+  ignoredListingsByKey.clear();
+}
+
+// A failed refresh keeps the previous rows: flickering them away helps nobody.
+const applyIgnoredListing = (
+  current: IgnoredFileTreeListings,
+  directoryPath: string,
+  listing: FileWorkspaceIgnoredEntries | null
+): IgnoredFileTreeListings => {
+  const notices = new Map(current.notices);
+  const notice = !listing ? 'failed' : listing.truncated ? 'truncated' : null;
+  if (notice) notices.set(directoryPath, notice);
+  else notices.delete(directoryPath);
+  return {
+    entries: listing
+      ? new Map(current.entries).set(directoryPath, listing.entries)
+      : current.entries,
+    notices,
+  };
+};
+
+/**
+ * Per-viewer ignored-name listings for the file tree, never shared state.
+ *
+ * Disabled means no request at all. Enabled, the root listing reloads on mount and
+ * whenever the provider changes (once per file-index revision); an ignored
+ * directory is read only when `loadDirectory` is called for it. The newest request
+ * per directory wins, and results survive an unmount under `cacheKey`.
+ */
+export function useIgnoredFileTreeEntries(
+  provider: FileWorkspaceProvider | null | undefined,
+  options: { readonly enabled: boolean; readonly cacheKey?: string }
+): {
+  readonly listings: ReadonlyMap<string, readonly FileWorkspaceProviderEntry[]>;
+  readonly truncated: boolean;
+  readonly failed: boolean;
+  readonly loadDirectory: (directoryPath: string) => void;
+} {
+  const { cacheKey } = options;
+  const enabled = options.enabled && typeof provider?.listIgnoredEntries === 'function';
+  const [tracked, setTracked] = useState(() => ({
+    key: cacheKey,
+    listings: readIgnoredListings(cacheKey),
+  }));
+  // Render-phase resync, as in `useFileTreeViewState`: a session switch adopts that
+  // tree's listings instead of showing the previous session's ignored names.
+  const listings = tracked.key === cacheKey ? tracked.listings : readIgnoredListings(cacheKey);
+  if (tracked.key !== cacheKey) {
+    setTracked({ key: cacheKey, listings });
+  }
+  const latestRequestRef = useRef(new Map<string, number>());
+
+  useEffect(() => {
+    if (tracked.listings === EMPTY_IGNORED_LISTINGS) return;
+    writeIgnoredListings(tracked.key, tracked.listings);
+  }, [tracked]);
+
+  const loadDirectory = useCallback(
+    (directoryPath: string) => {
+      if (!enabled || !provider?.listIgnoredEntries) return;
+      const requestKey = `${cacheKey ?? ''}\u0000${directoryPath}`;
+      const requestId = (latestRequestRef.current.get(requestKey) ?? 0) + 1;
+      latestRequestRef.current.set(requestKey, requestId);
+      void provider
+        .listIgnoredEntries(directoryPath)
+        .catch((error: unknown) => {
+          warnCodeCollab('ignored file listing failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        })
+        .then((listing) => {
+          if (latestRequestRef.current.get(requestKey) !== requestId) return;
+          setTracked((current) =>
+            current.key === cacheKey
+              ? {
+                  key: cacheKey,
+                  listings: applyIgnoredListing(current.listings, directoryPath, listing),
+                }
+              : current
+          );
+        });
+    },
+    [cacheKey, enabled, provider]
+  );
+
+  useEffect(() => {
+    loadDirectory('');
+  }, [loadDirectory]);
+
+  const notices = enabled ? [...listings.notices.values()] : [];
+  return {
+    listings: enabled ? listings.entries : EMPTY_IGNORED_LISTINGS.entries,
+    truncated: notices.includes('truncated'),
+    failed: notices.includes('failed'),
+    loadDirectory,
+  };
+}

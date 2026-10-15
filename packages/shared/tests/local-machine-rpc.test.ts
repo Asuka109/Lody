@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CodeCollabV2RpcResponseSchema } from '../src/code-collab';
 import {
   LocalMachineRpcResponseSchema,
   LocalMachineRpcRequestSchema,
@@ -137,6 +138,31 @@ describe('local Machine RPC', () => {
         params,
       },
     });
+  });
+
+  it('carries ignored-file listings intact through both response unions', () => {
+    expect(
+      safeParseLocalMachineRpcRequest(
+        JSON.stringify({
+          machineId: 'machine-1',
+          workspaceId: 'workspace-1',
+          method: 'code-collab/list-ignored',
+          params: { sessionId: 'session-1', path: '.' },
+        })
+      ).success
+    ).toBe(true);
+    const listing = {
+      status: 'ok',
+      path: '.',
+      entries: { '.env': true, node_modules: { kind: 'lazy' } },
+      truncated: false,
+    };
+    // An earlier, looser union member would strip `entries` instead of failing.
+    expect(LocalMachineRpcResponseSchema.parse({ ok: true, result: listing })).toEqual({
+      ok: true,
+      result: listing,
+    });
+    expect(CodeCollabV2RpcResponseSchema.parse(listing)).toEqual(listing);
   });
 
   it('accepts session terminate requests', () => {

@@ -11,6 +11,7 @@ host/runtime/CRDT capture implementation has been removed from this directory.
   Git All Changes uses the owner base; non-Git uses local diff evidence only when a
   trustworthy base exists. It owns in-memory file-index state replacement and Flock
   publish even when the scan itself ran in a worker.
+  `listIgnored` answers the per-viewer ignored-name overlay outside all of that state.
 - `file-index-scan-core.ts` — shared scan and Git merge-base resolution. Tracking
   lookup normalizes qualified local owner refs using `git/git-diff-base.ts`, also
   consumed by committed summary stats. Batch diffs pin the resolved commit for

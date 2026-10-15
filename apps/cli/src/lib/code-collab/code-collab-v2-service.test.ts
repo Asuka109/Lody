@@ -9,6 +9,7 @@ import {
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -1872,6 +1873,97 @@ async function gitCommitAll(workspaceRoot: string, message: string): Promise<voi
   await execFileAsync('git', ['add', '-A'], { cwd: workspaceRoot });
   await execFileAsync('git', ['commit', '-m', message], { cwd: workspaceRoot });
 }
+
+describe('CodeCollabV2Service listIgnored', () => {
+  it('lists Git-ignored names per viewer without publishing or watching', async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      await initGitRepoWithCommit(workspaceRoot);
+      await writeFile(path.join(workspaceRoot, '.gitignore'), '.env\n*.log\nnode_modules/\n');
+      await writeFile(path.join(workspaceRoot, 'index.ts'), 'export {};\n');
+      await writeFile(path.join(workspaceRoot, '.env'), 'TOKEN=1\n');
+      await writeFile(path.join(workspaceRoot, 'debug.log'), 'log\n');
+      await mkdir(path.join(workspaceRoot, 'node_modules/pkg/.git'), { recursive: true });
+      await writeFile(path.join(workspaceRoot, 'node_modules/pkg/index.js'), '\n');
+      await gitCommitAll(workspaceRoot, 'init');
+      const { published, signals, publishFileIndex, publishFileIndexSignal } =
+        collectPublishedSharedStates();
+      const service = new CodeCollabV2Service({
+        resolveWorkspace: makeResolver(workspaceRoot),
+        publishFileIndex,
+        publishFileIndexSignal,
+        workspaceWatchCoordinator: makeWorkspaceWatchCoordinator().coordinator,
+      });
+
+      await expect(service.listIgnored({ sessionId: SESSION_ID, path: '.' })).resolves.toEqual({
+        status: 'ok',
+        path: '.',
+        entries: { '.env': true, 'debug.log': true, node_modules: { kind: 'lazy' } },
+        truncated: false,
+      });
+      await expect(
+        service.listIgnored({ sessionId: SESSION_ID, path: 'node_modules/pkg' })
+      ).resolves.toEqual({
+        status: 'ok',
+        path: 'node_modules/pkg',
+        entries: { 'node_modules/pkg/index.js': true },
+        truncated: false,
+      });
+      expect(published).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(activeWorkspaceWatchCount(service)).toBe(0);
+    });
+  });
+
+  it('bounds the listing and reports truncation', async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      await initGitRepoWithCommit(workspaceRoot);
+      await writeFile(path.join(workspaceRoot, '.gitignore'), '*.log\n');
+      for (const name of ['a.log', 'b.log', 'c.log']) {
+        await writeFile(path.join(workspaceRoot, name), '\n');
+      }
+      const service = new CodeCollabV2Service({
+        resolveWorkspace: makeResolver(workspaceRoot),
+        maxIgnoredEntries: 2,
+      });
+
+      await expect(service.listIgnored({ sessionId: SESSION_ID, path: '.' })).resolves.toEqual({
+        status: 'ok',
+        path: '.',
+        entries: { 'a.log': true, 'b.log': true },
+        truncated: true,
+      });
+    });
+  });
+
+  it('rejects escapes and non-directories, and lists nothing outside Git', async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      const outside = await mkdtemp(path.join(tmpdir(), 'lody-code-collab-v2-outside-'));
+      try {
+        await writeFile(path.join(workspaceRoot, 'file.txt'), 'x\n');
+        await symlink(outside, path.join(workspaceRoot, 'escape'));
+        const service = new CodeCollabV2Service({ resolveWorkspace: makeResolver(workspaceRoot) });
+
+        await expect(
+          service.listIgnored({ sessionId: SESSION_ID, path: '../' })
+        ).rejects.toMatchObject({ code: 'invalid_path' });
+        await expect(
+          service.listIgnored({ sessionId: SESSION_ID, path: 'escape' })
+        ).rejects.toMatchObject({ code: 'invalid_path' });
+        await expect(
+          service.listIgnored({ sessionId: SESSION_ID, path: 'file.txt' })
+        ).rejects.toMatchObject({ code: 'unsupported_skipped' });
+        await expect(service.listIgnored({ sessionId: SESSION_ID, path: '.' })).resolves.toEqual({
+          status: 'ok',
+          path: '.',
+          entries: {},
+          truncated: false,
+        });
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+  });
+});
 
 const plainSnapshotText = (snapshot: { kind: string }): string | undefined => {
   if (snapshot.kind !== 'text') return undefined;

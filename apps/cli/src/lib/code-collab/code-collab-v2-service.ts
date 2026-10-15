@@ -36,6 +36,8 @@ import {
   type CodeCollabV2FileDigest,
   type CodeCollabV2InitDirectoryOk,
   type CodeCollabV2InitDirectoryRequest,
+  type CodeCollabV2ListIgnoredOk,
+  type CodeCollabV2ListIgnoredRequest,
   type CodeCollabV2LspUnsupported,
   type CodeCollabV2OpenAllChangesDiffRequest,
   type CodeCollabV2OpenAllChangesDiffResponse,
@@ -71,6 +73,7 @@ import {
   computeAllChanges,
   resolveAllChangesDiffBase,
   scanGitDirectoryEntries,
+  scanGitIgnoredEntries,
 } from './file-index-scan-core';
 import { closeDirectoryQuietly } from './directory-handle';
 import { CODE_COLLAB_IGNORED_DIRECTORY_NAMES } from './workspace-watch-path-policy';
@@ -86,6 +89,7 @@ const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 const ROOT_DIRECTORY_REQUEST_PATH = '.';
 const DEFAULT_FILE_TREE_SCAN_ENTRY_BUDGET = 10_000;
+const DEFAULT_IGNORED_ENTRY_LIMIT = 5_000;
 export const DEFAULT_CODE_COLLAB_WATCH_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 type WorkspaceResolution =
@@ -309,6 +313,7 @@ export class CodeCollabV2Service {
       readonly maxCompressedBytes?: number;
       readonly plainTextBytes?: number;
       readonly maxFileTreeEntries?: number;
+      readonly maxIgnoredEntries?: number;
       readonly watchIdleTimeoutMs?: number;
       readonly workspaceId?: string;
       readonly workspaceWatchCoordinator?: WorkspaceWatchCoordinatorApi;
@@ -556,6 +561,39 @@ export class CodeCollabV2Service {
       status: 'ok',
       path: resolved.workspacePath || ROOT_DIRECTORY_REQUEST_PATH,
       publishedEntries,
+    };
+  }
+
+  /**
+   * Names the shared scan leaves out, for one viewer. A plain read: it never enters
+   * owner state, the file-index Flock or watch ownership, so ignored names (`.env`)
+   * reach only the requester. Error messages stay path-free because they travel in
+   * the clear on Streams; the path rides in the encrypted error data.
+   */
+  async listIgnored(request: CodeCollabV2ListIgnoredRequest): Promise<CodeCollabV2ListIgnoredOk> {
+    const resolved = await this.resolveRequestDirectoryPath(
+      request.sessionId as SessionId,
+      request.path
+    );
+    // No index row vouches for an ignored path, so the real path is the boundary.
+    await assertRealPathInsideWorkspace(resolved);
+    const stat = await lstat(resolved.absolutePath).catch((error: unknown) => {
+      throw mapNodeReadError(error, resolved.workspacePath);
+    });
+    if (!stat.isDirectory()) {
+      throw new CodeCollabV2ServiceError('unsupported_skipped', 'Path is not a directory.', {
+        path: resolved.workspacePath,
+      });
+    }
+    const maxEntries = this.deps.maxIgnoredEntries ?? DEFAULT_IGNORED_ENTRY_LIMIT;
+    const listing = resolved.workspacePath
+      ? await listDirectoryChildren(resolved, maxEntries)
+      : await scanGitIgnoredEntries(resolved.workspaceRoot, maxEntries);
+    return {
+      status: 'ok',
+      path: resolved.workspacePath || ROOT_DIRECTORY_REQUEST_PATH,
+      entries: listing.entries,
+      truncated: listing.truncated,
     };
   }
 
@@ -2508,6 +2546,40 @@ async function scanDirectoryEntries(options: {
     }
   }
   return entries;
+}
+
+/**
+ * Direct children of an ignored directory, path-only. Unlike the shared scan this
+ * keeps `node_modules`, `dist` and the other skipped directory names, because
+ * showing them is the point; only Git metadata stays hidden.
+ */
+async function listDirectoryChildren(
+  resolved: ResolvedPath,
+  maxEntries: number
+): Promise<{ readonly entries: CodeCollabV2FileTreeState; readonly truncated: boolean }> {
+  const directoryEntries = await readDirectoryEntriesForScan(resolved);
+  const collisionKeys = findDirectoryEntryCollisionKeys(directoryEntries);
+  const entries: Record<string, CodeCollabV2FileTreeValue> = {};
+  let count = 0;
+  for (const { entry, comparisonKey } of directoryEntries) {
+    if (entry.name === '.git') {
+      continue;
+    }
+    const value = collisionKeys.has(comparisonKey)
+      ? ({ kind: 'skipped', reason: 'path_conflict' } as const)
+      : entry.isDirectory()
+        ? ({ kind: 'lazy' } as const)
+        : classifyDirectoryEntry(entry);
+    if (value === undefined) {
+      continue;
+    }
+    if (count >= maxEntries) {
+      return { entries, truncated: true };
+    }
+    entries[joinWorkspacePath(resolved.workspacePath, entry.name)] = value;
+    count += 1;
+  }
+  return { entries, truncated: false };
 }
 
 function scanDirectoryReadErrorValue(error: unknown): CodeCollabV2FileTreeValue {

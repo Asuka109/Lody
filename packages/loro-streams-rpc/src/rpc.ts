@@ -31,6 +31,8 @@ import type {
   CodeCollabV2Error,
   CodeCollabV2InitDirectoryOk,
   CodeCollabV2InitDirectoryRequest,
+  CodeCollabV2ListIgnoredOk,
+  CodeCollabV2ListIgnoredRequest,
   CodeCollabV2LspUnsupported,
   CodeCollabV2OpenAllChangesDiffRequest,
   CodeCollabV2OpenAllChangesDiffResponse,
@@ -254,6 +256,7 @@ export const LoroStreamsRpcMethodSchema = z.enum([
   'code-collab/open-all-changes-diff',
   'code-collab/open-turn-diff',
   'code-collab/init-directory',
+  'code-collab/list-ignored',
   'code-collab/lsp-definition',
   'code-collab/lsp-references',
   // File Preview v3. Deliberately outside the `code-collab/` namespace: it is a
@@ -481,6 +484,11 @@ export const LoroCodeCollabV2OpenTurnDiffRpcRequestSchema = BaseRpcRequestSchema
 
 export const LoroCodeCollabV2InitDirectoryRpcRequestSchema = BaseRpcRequestSchema.extend({
   method: z.literal('code-collab/init-directory'),
+  params: CodeCollabV2RpcContentEnvelopeSchema,
+}).strict();
+
+export const LoroCodeCollabV2ListIgnoredRpcRequestSchema = BaseRpcRequestSchema.extend({
+  method: z.literal('code-collab/list-ignored'),
   params: CodeCollabV2RpcContentEnvelopeSchema,
 }).strict();
 
@@ -746,6 +754,7 @@ export const LoroStreamsRpcRequestSchema = z.discriminatedUnion('method', [
   LoroCodeCollabV2OpenAllChangesDiffRpcRequestSchema,
   LoroCodeCollabV2OpenTurnDiffRpcRequestSchema,
   LoroCodeCollabV2InitDirectoryRpcRequestSchema,
+  LoroCodeCollabV2ListIgnoredRpcRequestSchema,
   LoroCodeCollabV2LspDefinitionRpcRequestSchema,
   LoroCodeCollabV2LspReferencesRpcRequestSchema,
   LoroFilePreviewRpcRequestSchema,
@@ -884,6 +893,9 @@ export type LoroCodeCollabV2OpenTurnDiffRpcRequest = z.infer<
 >;
 export type LoroCodeCollabV2InitDirectoryRpcRequest = z.infer<
   typeof LoroCodeCollabV2InitDirectoryRpcRequestSchema
+>;
+export type LoroCodeCollabV2ListIgnoredRpcRequest = z.infer<
+  typeof LoroCodeCollabV2ListIgnoredRpcRequestSchema
 >;
 export type CodeCollabV2LspRpcParams = z.infer<typeof CodeCollabV2LspRpcParamsSchema>;
 export type LoroCodeCollabV2LspDefinitionRpcRequest = z.infer<
@@ -3330,6 +3342,20 @@ export class LoroStreamsMachineRpcClient {
     })) as CodeCollabV2InitDirectoryOk | CodeCollabV2Error | null;
   }
 
+  async requestCodeCollabListIgnored(
+    options: CodeCollabV2ListIgnoredRequest & { ownerSessionId?: string; timeoutMs?: number }
+  ): Promise<CodeCollabV2ListIgnoredOk | CodeCollabV2Error | null> {
+    return (await this.sendRequest({
+      method: 'code-collab/list-ignored',
+      timeoutMs: options.timeoutMs ?? 30_000,
+      ownerSessionId: options.ownerSessionId ?? options.sessionId,
+      params: {
+        sessionId: options.sessionId,
+        path: options.path,
+      },
+    })) as CodeCollabV2ListIgnoredOk | CodeCollabV2Error | null;
+  }
+
   async requestCodeCollabLspDefinition(options: {
     sessionId: string;
     path: string;
@@ -3742,6 +3768,12 @@ export class LoroStreamsMachineRpcClient {
           params: CodeCollabV2InitDirectoryRequest;
         }
       | {
+          method: 'code-collab/list-ignored';
+          timeoutMs: number;
+          ownerSessionId: string;
+          params: CodeCollabV2ListIgnoredRequest;
+        }
+      | {
           method: 'code-collab/lsp-definition' | 'code-collab/lsp-references';
           timeoutMs: number;
           ownerSessionId: string;
@@ -3835,6 +3867,7 @@ export class LoroStreamsMachineRpcClient {
       args.method === 'code-collab/open-all-changes-diff' ||
       args.method === 'code-collab/open-turn-diff' ||
       args.method === 'code-collab/init-directory' ||
+      args.method === 'code-collab/list-ignored' ||
       args.method === 'code-collab/lsp-definition' ||
       args.method === 'code-collab/lsp-references' ||
       args.method === 'file/preview' ||
@@ -4099,6 +4132,13 @@ export class LoroStreamsMachineRpcClient {
           };
           break;
         case 'code-collab/init-directory':
+          request = {
+            ...envelope,
+            method: args.method,
+            params: await encryptCodeCollabV2RpcPayload(args.ownerSessionId, args.params),
+          };
+          break;
+        case 'code-collab/list-ignored':
           request = {
             ...envelope,
             method: args.method,

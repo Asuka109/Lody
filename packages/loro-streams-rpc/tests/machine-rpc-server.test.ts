@@ -5,6 +5,7 @@ import type {
   AgentConfigId,
   LocalProjectControlResponse,
   LocalProjectId,
+  CodeCollabV2ListIgnoredOk,
   CodeCollabV2OpenCurrentDiffResponse,
   CodeCollabV2OpenTextOk,
   CodeCollabV2OpenTurnDiffResponse,
@@ -2383,6 +2384,64 @@ describe('LoroStreamsMachineRpcServer', () => {
       add: 1,
       del: 1,
     });
+
+    server.stop();
+  });
+
+  it('decrypts ignored-file listing requests and encrypts the listing for the owner', async () => {
+    const fake = createFakeStreamClient();
+    const listing: CodeCollabV2ListIgnoredOk = {
+      status: 'ok',
+      path: '.',
+      entries: { '.env': true, node_modules: { kind: 'lazy' } },
+      truncated: false,
+    };
+    const listCodeCollabIgnored = vi.fn(async () => listing);
+    const server = new LoroStreamsMachineRpcServer({
+      logger: createSilentLogger(),
+      workspaceId: 'workspace-1' as WorkspaceId,
+      machineId: 'machine-1' as MachineId,
+      streamClient: fake.streamClient,
+      getMachineStatus: vi.fn(),
+      refreshMachineAcpCapabilities: vi.fn(),
+      listCodeCollabIgnored,
+    });
+
+    fake.pushBatch({
+      messages: [
+        {
+          jsonrpc: '2.0',
+          id: 'req-1',
+          method: 'code-collab/list-ignored',
+          rpcVersion: '1',
+          machineId: 'machine-1',
+          workspaceId: 'workspace-1',
+          replyTo: 'workspace-1:rpc:res:machine-1',
+          sentAt: Date.now(),
+          expiresAt: Date.now() + 5000,
+          params: await encryptCodeCollabV2RpcPayload('session-parent', {
+            sessionId: 'session-child',
+            path: '.',
+          }),
+        },
+      ],
+      nextOffset: '1',
+      cursor: 'cursor-1',
+      upToDate: true,
+    });
+    await server.start();
+    await vi.waitFor(() => {
+      expect(fake.appended).toHaveLength(1);
+    });
+
+    expect(listCodeCollabIgnored).toHaveBeenCalledWith({ sessionId: 'session-child', path: '.' });
+    const response = fake.appended[0]?.value as { result: unknown };
+    await expect(
+      decryptCodeCollabV2RpcPayload(
+        response.result as CodeCollabV2RpcContentEnvelope,
+        'session-parent'
+      )
+    ).resolves.toEqual(listing);
 
     server.stop();
   });
