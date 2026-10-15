@@ -8,11 +8,16 @@
 
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { Provider as JotaiProvider, createStore } from 'jotai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FileTreeProviderView } from '../src/components/sessions/components/file-tree-view';
+import { clearIgnoredFileTreeListings } from '../src/hooks/use-code-session';
 import { clearFileTreeViewStates } from '../src/lib/file-tree-view-state';
-import type { FileWorkspaceProvider } from '../src/lib/file-workspace-provider';
+import type {
+  FileWorkspaceIgnoredEntries,
+  FileWorkspaceProvider,
+} from '../src/lib/file-workspace-provider';
 import { initI18n } from '../src/i18n';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -37,6 +42,8 @@ describe('file tree view state across unmount', () => {
   beforeEach(async () => {
     await initI18n('en');
     clearFileTreeViewStates();
+    clearIgnoredFileTreeListings();
+    localStorage.clear();
     vi.stubGlobal(
       'ResizeObserver',
       class {
@@ -52,6 +59,8 @@ describe('file tree view state across unmount', () => {
     container?.remove();
     container = null;
     clearFileTreeViewStates();
+    clearIgnoredFileTreeListings();
+    localStorage.clear();
     vi.unstubAllGlobals();
   });
 
@@ -143,6 +152,76 @@ describe('file tree view state across unmount', () => {
     container?.remove();
 
     host = await render(treeElement(undefined));
+    expect(rowLabels(host)).toEqual(['src', 'README.md']);
+  });
+
+  it('overlays ignored files only after the toggle, per directory, and keeps them across unmount', async () => {
+    const entry = (path: string, lazy = false) =>
+      ({
+        path,
+        entryType: lazy ? 'lazy-directory' : 'file',
+        kind: 'text',
+        sourceState: 'live-readonly',
+      }) as const;
+    const listings: Record<string, FileWorkspaceIgnoredEntries> = {
+      '': { entries: [entry('.env'), entry('node_modules', true)], truncated: false },
+      node_modules: { entries: [entry('node_modules/left-pad.js')], truncated: false },
+    };
+    const requests: string[] = [];
+    let answer = true;
+    const provider = {
+      ...createReadyProvider(PATHS),
+      listIgnoredEntries: (directoryPath: string) => {
+        requests.push(directoryPath);
+        // Never settles once `answer` is off: what renders then must come from memory.
+        return answer
+          ? Promise.resolve(listings[directoryPath] ?? { entries: [], truncated: false })
+          : new Promise<FileWorkspaceIgnoredEntries>(() => undefined);
+      },
+    } as FileWorkspaceProvider;
+    const store = createStore();
+    const element = () =>
+      createElement(
+        JotaiProvider,
+        { store },
+        createElement(FileTreeProviderView, {
+          fileProvider: provider,
+          fileProviderPending: false,
+          handleOpenFile: () => undefined,
+          viewStateKey: 'session-files:s1',
+        })
+      );
+    const toggle = (host: HTMLElement) =>
+      host.querySelector<HTMLElement>('button[aria-label="Hide ignored files"]')!;
+    // Lets the provider's already-resolved promise chain land, without timers.
+    const settle = () =>
+      act(async () => {
+        for (let tick = 0; tick < 5; tick += 1) await Promise.resolve();
+      });
+
+    let host = await render(element());
+    await settle();
+    expect(requests).toEqual([]);
+    expect(toggle(host).getAttribute('aria-pressed')).toBe('true');
+    expect(rowLabels(host)).toEqual(['src', 'README.md']);
+
+    await click(toggle(host));
+    await settle();
+    expect(requests).toEqual(['']);
+    expect(rowLabels(host)).toEqual(['node_modules', 'src', '.env', 'README.md']);
+
+    await click(rowByLabel(host, 'node_modules'));
+    await settle();
+    expect(requests).toEqual(['', 'node_modules']);
+    expect(rowLabels(host)).toEqual(['node_modules', 'left-pad.js', 'src', '.env', 'README.md']);
+
+    await unmount();
+    container?.remove();
+    answer = false;
+    host = await render(element());
+    expect(rowLabels(host)).toEqual(['node_modules', 'left-pad.js', 'src', '.env', 'README.md']);
+
+    await click(toggle(host));
     expect(rowLabels(host)).toEqual(['src', 'README.md']);
   });
 });

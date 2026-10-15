@@ -1,14 +1,25 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
-import { useAtomValue } from 'jotai';
+import { useAtom, useAtomValue } from 'jotai';
 import { useTranslation } from 'react-i18next';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronRight, CloudOff, FileWarning, FolderOpen, RefreshCw } from 'lucide-react';
+import * as stylex from '@stylexjs/stylex';
+import {
+  ChevronRight,
+  CloudOff,
+  Eye,
+  EyeOff,
+  FileWarning,
+  FolderOpen,
+  RefreshCw,
+} from 'lucide-react';
 import { getMachineFlockLocalProjects, type FileTreeItem, type SessionMeta } from '@lody/shared';
 import { type TreeDataItem } from '@/components/tree-view';
 import { ContextMenu } from '@lody/ui/context-menu';
+import { colors } from '@lody/ui/tokens/colors.stylex';
+import { space } from '@lody/ui/tokens/scales.stylex';
 import { useSessionFileActions, type SessionFileMenuItem } from '@/hooks/use-session-file-actions';
 import { FileTreeSkeleton, FileTreeStatePanel } from './file-tree-states';
-import { useFileWorkspaceTree } from '@/hooks/use-code-session';
+import { useFileWorkspaceTree, useIgnoredFileTreeEntries } from '@/hooks/use-code-session';
 import { useCodeCollabSessionFileProvider } from '@/hooks/use-code-collab-session-file-provider';
 import { useCodeCollabRequestedRole } from '@/hooks/use-code-collab-requested-role';
 import { useMachineFlockRows } from '@/hooks/use-machine-flock-rows';
@@ -16,7 +27,11 @@ import {
   useLocalProjectFilePaths,
   type LocalProjectFilePathsSource,
 } from '@/hooks/use-local-project-file-paths';
-import { buildFileTreeFromPaths, markFileTreeModified } from '@/lib/file-tree';
+import {
+  buildFileTreeFromPaths,
+  markFileTreeModified,
+  mergeIgnoredFileTreeEntries,
+} from '@/lib/file-tree';
 import { getBasename } from '@/lib';
 import { cn } from '@/lib/utils';
 import {
@@ -41,6 +56,7 @@ import { logCodeCollabDebug } from '@/lib/code-collab-debug';
 import { resolveEffectiveCodeCollabWorkspaceId } from '@/lib/code-collab-workspace-id';
 import { currentWorkspaceIdAtom, getMachineMetaByIdAtomFamily, userAtom } from '@/atoms';
 import { localMachineIdAtom } from '@/atoms/local-probe';
+import { fileTreeHideIgnoredFilesAtom } from '@/atoms/settings';
 import { runtimeAtom } from '@/atoms/runtime';
 import type { FileWorkspaceProvider } from '@/lib/file-workspace-provider';
 import { Button, ScrollArea } from '@/ui';
@@ -125,13 +141,58 @@ const buildLocalFileRefreshToken = (session: SessionMeta): string => {
   );
 };
 
+const styles = stylex.create({
+  panel: {
+    display: 'flex',
+    flexDirection: 'column',
+    height: '100%',
+    minHeight: 0,
+  },
+  toolbar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: space[2],
+    flexShrink: 0,
+    paddingBlock: space[1],
+    paddingInline: space[1],
+  },
+  notice: {
+    flex: 1,
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    color: colors.tertiaryLabel,
+    fontSize: '0.85em',
+  },
+  scroll: {
+    flex: 1,
+    minHeight: 0,
+  },
+  ignoredRow: {
+    opacity: 0.6,
+  },
+});
+
+const IGNORED_ROW_CLASS = stylex.props(styles.ignoredRow).className;
+
+// `ignored` routes a lazy directory click: an ignored one is listed by the viewer's
+// overlay, an indexed one is initialized in the shared index.
 const fileTreeToTreeData = (
   items: FileTreeItem[],
   onFileOpen: (filePath: string) => void,
-  onLazyDirectoryOpen?: (directoryId: string) => void
+  onLazyDirectoryOpen?: (directoryId: string, ignored: boolean) => void,
+  ignoredPaths?: ReadonlySet<string>
 ): TreeDataItem[] => {
   const walk = (item: FileTreeItem): TreeDataItem => {
     const name = getBasename(item.path);
+    const ignored = ignoredPaths?.has(item.path) === true;
+    // Ignored rows are never in the Changes list, so the two classes never meet.
+    const className = ignored
+      ? IGNORED_ROW_CLASS
+      : item.modified
+        ? 'text-modified-file'
+        : undefined;
     if (item.type === 'directory') {
       const FolderIcon = createFolderIconComponent(item.path);
       const lazyDirectoryId = item.lazyDirectoryId;
@@ -144,8 +205,8 @@ const fileTreeToTreeData = (
         children: (item.children ?? []).map(walk),
         ...(lazyDirectoryId === undefined || onLazyDirectoryOpen === undefined
           ? {}
-          : { onClick: () => onLazyDirectoryOpen(lazyDirectoryId) }),
-        className: item.modified ? 'text-modified-file' : undefined,
+          : { onClick: () => onLazyDirectoryOpen(lazyDirectoryId, ignored) }),
+        className,
       };
     }
 
@@ -155,7 +216,7 @@ const fileTreeToTreeData = (
       name,
       icon: FileIcon,
       onClick: () => onFileOpen(item.path),
-      className: item.modified ? 'text-modified-file' : undefined,
+      className,
     };
   };
 
@@ -503,9 +564,22 @@ function ControlledFileTreeView({
   const providerFileTree = useFileWorkspaceTree(fileProvider, {
     enabled: Boolean(fileProvider),
   });
+  const [hideIgnoredFiles, setHideIgnoredFiles] = useAtom(fileTreeHideIgnoredFilesAtom);
+  const supportsIgnoredFiles = typeof fileProvider?.listIgnoredEntries === 'function';
+  const ignoredFiles = useIgnoredFileTreeEntries(fileProvider, {
+    enabled: supportsIgnoredFiles && !hideIgnoredFiles,
+    ...(viewStateKey === undefined ? {} : { cacheKey: viewStateKey }),
+  });
+  const loadIgnoredDirectory = ignoredFiles.loadDirectory;
   const changedFilePathSet = useChangedFilePathSet(changedFilePaths);
   const handleLazyDirectoryOpen = useCallback(
-    (directoryId: string) => {
+    (directoryId: string, ignored: boolean) => {
+      // The overlay owns ignored directories; the CLI's lazy-directory check on
+      // init-directory is the second line of defence if one slips through.
+      if (ignored) {
+        loadIgnoredDirectory(directoryId);
+        return;
+      }
       if (!fileProvider?.initializeDirectory) return;
       if (initializingDirectoriesRef.current.has(directoryId)) return;
       initializingDirectoriesRef.current.add(directoryId);
@@ -513,14 +587,26 @@ function ControlledFileTreeView({
         initializingDirectoriesRef.current.delete(directoryId);
       });
     },
-    [fileProvider]
+    [fileProvider, loadIgnoredDirectory]
   );
   const fileTreeData = useMemo(() => {
     const tree = changedFilePathSet
       ? markFileTreeModified(providerFileTree.state, changedFilePathSet)
       : providerFileTree.state;
-    return fileTreeToTreeData(tree, handleOpenFile, handleLazyDirectoryOpen);
-  }, [changedFilePathSet, providerFileTree.state, handleOpenFile, handleLazyDirectoryOpen]);
+    const merged = mergeIgnoredFileTreeEntries(tree, ignoredFiles.listings);
+    return fileTreeToTreeData(
+      merged.tree,
+      handleOpenFile,
+      handleLazyDirectoryOpen,
+      merged.ignoredPaths
+    );
+  }, [
+    changedFilePathSet,
+    providerFileTree.state,
+    ignoredFiles.listings,
+    handleOpenFile,
+    handleLazyDirectoryOpen,
+  ]);
   const message = providerFileTree.message ?? fileProviderMessage;
 
   // Collapse the connecting/ready phases into a single "loading" surface: the
@@ -580,17 +666,54 @@ function ControlledFileTreeView({
     );
   }
 
+  const hideIgnoredLabel = t('sessions.codeSession.files.hideIgnored', 'Hide ignored files');
+  const ignoredNotice = ignoredFiles.failed
+    ? t('sessions.codeSession.files.ignoredUnavailable', "Couldn't load ignored files.")
+    : ignoredFiles.truncated
+      ? t('sessions.codeSession.files.ignoredTruncated', "Some ignored files aren't shown.")
+      : null;
+
   return (
-    <ScrollArea className="h-full" viewportRef={scrollViewportRef}>
-      <div className="p-1">
-        <VirtualFileTree
-          data={fileTreeData}
-          viewportRef={scrollViewportRef}
-          viewStateKey={viewStateKey}
-          {...(fileMenuItems === undefined ? {} : { fileMenuItems })}
-        />
+    <div {...stylex.props(styles.panel)}>
+      {supportsIgnoredFiles ? (
+        <div {...stylex.props(styles.toolbar)}>
+          <span {...stylex.props(styles.notice)} title={ignoredNotice ?? undefined}>
+            {ignoredNotice}
+          </span>
+          {/* A ghost icon button like the panel header's, not a Toggle: hiding is
+              the default, and a Toggle's pressed ink would make the resting state
+              the brightest glyph in the panel. The glyph carries the state. */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="mini"
+            icon
+            aria-label={hideIgnoredLabel}
+            aria-pressed={hideIgnoredFiles}
+            title={hideIgnoredLabel}
+            onClick={() => setHideIgnoredFiles(!hideIgnoredFiles)}
+          >
+            {hideIgnoredFiles ? (
+              <EyeOff size="100%" aria-hidden />
+            ) : (
+              <Eye size="100%" aria-hidden />
+            )}
+          </Button>
+        </div>
+      ) : null}
+      <div {...stylex.props(styles.scroll)}>
+        <ScrollArea className="h-full" viewportRef={scrollViewportRef}>
+          <div className="p-1">
+            <VirtualFileTree
+              data={fileTreeData}
+              viewportRef={scrollViewportRef}
+              viewStateKey={viewStateKey}
+              {...(fileMenuItems === undefined ? {} : { fileMenuItems })}
+            />
+          </div>
+        </ScrollArea>
       </div>
-    </ScrollArea>
+    </div>
   );
 }
 

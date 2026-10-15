@@ -971,6 +971,68 @@ describe('LoroStreamsMachineRpcClient', () => {
     client.stop();
   });
 
+  it('encrypts ignored-file listing requests and decrypts their owner-scoped errors', async () => {
+    const fake = createFakeStreamClient();
+    const client = new LoroStreamsMachineRpcClient({
+      workspaceId: 'workspace-1',
+      machineId: 'machine-1',
+      streamClient: fake.streamClient,
+    });
+
+    const responsePromise = client.requestCodeCollabListIgnored({
+      sessionId: 'session-child',
+      ownerSessionId: 'session-parent',
+      path: 'node_modules',
+      timeoutMs: 5000,
+    });
+    await vi.waitFor(() => {
+      expect(fake.appended).toHaveLength(1);
+    });
+
+    const request = fake.appended[0]?.value as { id: string; method: string; params: unknown };
+    expect(request.method).toBe('code-collab/list-ignored');
+    await expect(
+      decryptCodeCollabV2RpcPayload(
+        request.params as CodeCollabV2RpcContentEnvelope,
+        'session-parent'
+      )
+    ).resolves.toEqual({ sessionId: 'session-child', path: 'node_modules' });
+    // The path rides only in the encrypted data; the clear message names no path.
+    fake.pushBatch({
+      messages: [
+        {
+          jsonrpc: '2.0',
+          id: request.id,
+          method: 'code-collab/list-ignored',
+          rpcVersion: '1',
+          machineId: 'machine-1',
+          error: {
+            code: 'invalid_path',
+            message: 'Resolved path escapes workspace root.',
+            data: await encryptCodeCollabV2RpcPayload('session-parent', {
+              status: 'error',
+              code: 'invalid_path',
+              message: 'Resolved path escapes workspace root.',
+              path: 'node_modules',
+            }),
+          },
+        },
+      ],
+      nextOffset: '1',
+      cursor: 'cursor-1',
+      upToDate: true,
+    });
+
+    await expect(responsePromise).resolves.toEqual({
+      status: 'error',
+      code: 'invalid_path',
+      message: 'Resolved path escapes workspace root.',
+      path: 'node_modules',
+    });
+
+    client.stop();
+  });
+
   it('sends machine ping requests and resolves pong responses', async () => {
     const fake = createFakeStreamClient();
     const client = new LoroStreamsMachineRpcClient({

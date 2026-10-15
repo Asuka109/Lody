@@ -4,6 +4,7 @@ import path from 'node:path';
 import type {
   CodeCollabV2AllChangesState,
   CodeCollabV2AllChangesValue,
+  CodeCollabV2FileTreeState,
   CodeCollabV2FileTreeValue,
 } from '@lody/shared';
 
@@ -50,6 +51,50 @@ export async function scanGitDirectoryEntries(
     recursive: options.recursive,
     relativeFilePaths: result.paths,
   });
+}
+
+/**
+ * Ignored names under `cwd` for the per-viewer `code-collab/list-ignored` read.
+ * `--directory` collapses a wholly ignored directory into one `dir/` row, which
+ * becomes a lazy entry: nothing below it is read until a viewer expands it.
+ * Shallow paths win the budget. Outside a Git worktree the listing is empty.
+ */
+export async function scanGitIgnoredEntries(
+  cwd: string,
+  maxEntries: number
+): Promise<{ readonly entries: CodeCollabV2FileTreeState; readonly truncated: boolean }> {
+  const listed = await runGit(cwd, [
+    'ls-files',
+    '-z',
+    '--others',
+    '--ignored',
+    '--exclude-standard',
+    '--directory',
+    '--',
+    '.',
+  ]);
+  if (!listed.ok) {
+    return { entries: {}, truncated: false };
+  }
+  const candidates = new Map<string, CodeCollabV2FileTreeValue>();
+  for (const listedPath of listed.stdout.split('\0')) {
+    const normalized = normalizeGitPath(listedPath);
+    const isDirectory = normalized.endsWith('/');
+    const workspacePath = isDirectory ? normalized.slice(0, -1) : normalized;
+    if (!isValidRelativeGitPath(workspacePath)) {
+      continue;
+    }
+    candidates.set(workspacePath, isDirectory ? { kind: 'lazy' } : true);
+  }
+  const sorted = [...candidates.entries()].sort(([leftPath], [rightPath]) => {
+    const depthOrder = pathDepth(leftPath) - pathDepth(rightPath);
+    return depthOrder === 0 ? leftPath.localeCompare(rightPath) : depthOrder;
+  });
+  const limit = Math.max(0, maxEntries);
+  return {
+    entries: Object.fromEntries(sorted.slice(0, limit)),
+    truncated: sorted.length > limit,
+  };
 }
 
 async function runGitLsFiles(

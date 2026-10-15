@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildFileTreeFromPaths, markFileTreeModified } from '../src/lib/file-tree';
+import type { FileTreeItem } from '@lody/shared';
+
+import {
+  buildFileTreeFromPaths,
+  markFileTreeModified,
+  mergeIgnoredFileTreeEntries,
+  type IgnoredFileTreeEntry,
+} from '../src/lib/file-tree';
 
 describe('buildFileTreeFromPaths', () => {
   it('builds a sorted tree with directories before files', () => {
@@ -117,5 +124,72 @@ describe('markFileTreeModified', () => {
     const pkgNode = marked[0];
     expect(pkgNode?.lazyDirectoryId).toBe('dir-1');
     expect(pkgNode?.modified).toBe(true);
+  });
+});
+
+describe('mergeIgnoredFileTreeEntries', () => {
+  const file = (path: string): IgnoredFileTreeEntry => ({ path, entryType: 'file' });
+  const lazy = (path: string): IgnoredFileTreeEntry => ({ path, entryType: 'lazy-directory' });
+  const outline = (items: readonly FileTreeItem[]): string[] =>
+    items.flatMap((item) => [
+      `${item.type === 'directory' ? 'd' : 'f'}:${item.path}${item.lazyDirectoryId ? '*' : ''}`,
+      ...outline(item.children ?? []),
+    ]);
+
+  it('returns the same tree when there is nothing to overlay', () => {
+    const tree = buildFileTreeFromPaths(['src/a.ts']);
+    const merged = mergeIgnoredFileTreeEntries(tree, new Map());
+    expect(merged.tree).toBe(tree);
+    expect(merged.ignoredPaths.size).toBe(0);
+  });
+
+  it('sorts ignored rows among indexed ones, lets the index win and synthesizes parents', () => {
+    const tree = buildFileTreeFromPaths(['src/a.ts', 'README.md']);
+    const before = structuredClone(tree);
+    const merged = mergeIgnoredFileTreeEntries(
+      tree,
+      new Map([
+        ['', [file('.env'), lazy('node_modules'), file('src/a.ts'), lazy('pkg/web/dist')]],
+        ['node_modules', [lazy('node_modules/left-pad'), file('node_modules/.bin')]],
+      ])
+    );
+
+    expect(outline(merged.tree)).toEqual([
+      'd:node_modules*',
+      'd:node_modules/left-pad*',
+      'f:node_modules/.bin',
+      'd:pkg',
+      'd:pkg/web',
+      'd:pkg/web/dist*',
+      'd:src',
+      'f:src/a.ts',
+      'f:.env',
+      'f:README.md',
+    ]);
+    expect([...merged.ignoredPaths].sort()).toEqual([
+      '.env',
+      'node_modules',
+      'node_modules/.bin',
+      'node_modules/left-pad',
+      'pkg',
+      'pkg/web',
+      'pkg/web/dist',
+    ]);
+    expect(tree).toEqual(before);
+  });
+
+  it('drops listings for directories the root listing no longer marks as ignored', () => {
+    const tree = buildFileTreeFromPaths(['src/a.ts']);
+    const merged = mergeIgnoredFileTreeEntries(
+      tree,
+      new Map([
+        ['', [file('.env')]],
+        ['node_modules', [file('node_modules/stale.js')]],
+        ['src', [file('src/generated.ts')]],
+      ])
+    );
+
+    expect(outline(merged.tree)).toEqual(['d:src', 'f:src/a.ts', 'f:.env']);
+    expect([...merged.ignoredPaths]).toEqual(['.env']);
   });
 });

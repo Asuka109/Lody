@@ -61,6 +61,8 @@ import type {
   CodeCollabV2FileIndexSnapshot,
   CodeCollabV2InitDirectoryOk,
   CodeCollabV2InitDirectoryRequest,
+  CodeCollabV2ListIgnoredOk,
+  CodeCollabV2ListIgnoredRequest,
   CodeCollabV2LspUnsupported,
   CodeCollabV2OpenAllChangesDiffRequest,
   CodeCollabV2OpenAllChangesDiffResponse,
@@ -466,6 +468,11 @@ export type WorkspaceRuntime = {
     request: CodeCollabV2InitDirectoryRequest,
     options?: { timeoutMs?: number; ownerSessionId?: SessionId | string }
   ) => Promise<CodeCollabV2InitDirectoryOk | CodeCollabV2Error | null>;
+  requestCodeCollabListIgnored: (
+    machineId: MachineId,
+    request: CodeCollabV2ListIgnoredRequest,
+    options?: { timeoutMs?: number; ownerSessionId?: SessionId | string }
+  ) => Promise<CodeCollabV2ListIgnoredOk | CodeCollabV2Error | null>;
   requestCodeCollabLspDefinition: (
     machineId: MachineId,
     request: {

@@ -96,8 +96,8 @@ and the `file/preview` namespace are in
   choose a command for the target daemon.
 - Code Collab v2 file/LSP methods are ordinary `code-collab/*` Machine RPC methods
   (`open-text`, `refresh-text`, `save-text`, `init-directory`, `open-current-diff`,
-  `open-turn-diff`, `lsp-definition`, `lsp-references`). They carry workspace-relative
-  paths, never per-file ids.
+  `open-turn-diff`, `list-ignored`, `lsp-definition`, `lsp-references`). They carry
+  workspace-relative paths, never per-file ids.
 - Remote Streams transport wraps Code Collab request params, success results, and
   business error `data` in a v2 owner-session content-key envelope. The business
   schemas stay unchanged; `ownerSessionId` is transport metadata and child sessions

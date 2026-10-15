@@ -134,3 +134,92 @@ export function buildFileTreeFromPaths(
     })
     .map(nodeToFileTreeItem);
 }
+
+/** The part of a provider entry the ignored-name overlay reads. */
+export type IgnoredFileTreeEntry = {
+  readonly path: string;
+  readonly entryType?: 'file' | 'lazy-directory';
+};
+
+const NO_IGNORED_PATHS: ReadonlySet<string> = new Set<string>();
+
+const compareFileTreeSiblings = (left: FileTreeItem, right: FileTreeItem): number => {
+  if (left.type !== right.type) return left.type === 'directory' ? -1 : 1;
+  return left.path.localeCompare(right.path);
+};
+
+const parentWorkspacePath = (path: string): string => {
+  const separator = path.lastIndexOf('/');
+  return separator === -1 ? '' : path.slice(0, separator);
+};
+
+const workspacePathDepth = (path: string): number => (path ? path.split('/').length : 0);
+
+/**
+ * Overlay per-viewer ignored-name listings on the shared index tree.
+ *
+ * `listings` maps a directory (`''` = root) to the entries the machine listed for
+ * it. The root listing may reach any depth; a directory's own listing is adopted
+ * only when an earlier listing added that directory as an ignored lazy one, so a
+ * listing left over from before the directory vanished or became indexed is
+ * dropped. Indexed paths always win, and missing parents are synthesized as
+ * ignored. The input tree is never mutated, and with no listings it is returned
+ * by reference so the default (hidden) path costs nothing.
+ */
+export function mergeIgnoredFileTreeEntries(
+  tree: FileTreeItem[],
+  listings: ReadonlyMap<string, readonly IgnoredFileTreeEntry[]>
+): { readonly tree: FileTreeItem[]; readonly ignoredPaths: ReadonlySet<string> } {
+  if (listings.size === 0) return { tree, ignoredPaths: NO_IGNORED_PATHS };
+
+  const itemsByPath = new Map<string, FileTreeItem>();
+  const clone = (item: FileTreeItem): FileTreeItem => {
+    const copy: FileTreeItem =
+      item.children === undefined ? { ...item } : { ...item, children: item.children.map(clone) };
+    itemsByPath.set(copy.path, copy);
+    return copy;
+  };
+  const merged = tree.map(clone);
+  const ignoredPaths = new Set<string>();
+  const ignoredLazyDirectories = new Set<string>();
+  const unsortedSiblings = new Set<FileTreeItem[]>();
+
+  const childrenOf = (directoryPath: string): FileTreeItem[] | null => {
+    if (!directoryPath) return merged;
+    const existing = itemsByPath.get(directoryPath);
+    if (existing) return existing.type === 'directory' ? (existing.children ??= []) : null;
+    const siblings = childrenOf(parentWorkspacePath(directoryPath));
+    if (!siblings) return null;
+    const children: FileTreeItem[] = [];
+    const directory: FileTreeItem = { path: directoryPath, type: 'directory', children };
+    siblings.push(directory);
+    unsortedSiblings.add(siblings);
+    itemsByPath.set(directoryPath, directory);
+    ignoredPaths.add(directoryPath);
+    return children;
+  };
+
+  const ordered = [...listings].sort(
+    ([left], [right]) =>
+      workspacePathDepth(left) - workspacePathDepth(right) || left.localeCompare(right)
+  );
+  for (const [directoryPath, entries] of ordered) {
+    if (directoryPath && !ignoredLazyDirectories.has(directoryPath)) continue;
+    for (const entry of entries) {
+      if (itemsByPath.has(entry.path)) continue;
+      const siblings = childrenOf(parentWorkspacePath(entry.path));
+      if (!siblings) continue;
+      const item: FileTreeItem =
+        entry.entryType === 'lazy-directory'
+          ? { path: entry.path, type: 'directory', children: [], lazyDirectoryId: entry.path }
+          : { path: entry.path, type: 'file' };
+      if (item.lazyDirectoryId !== undefined) ignoredLazyDirectories.add(entry.path);
+      siblings.push(item);
+      unsortedSiblings.add(siblings);
+      itemsByPath.set(entry.path, item);
+      ignoredPaths.add(entry.path);
+    }
+  }
+  for (const siblings of unsortedSiblings) siblings.sort(compareFileTreeSiblings);
+  return { tree: merged, ignoredPaths };
+}

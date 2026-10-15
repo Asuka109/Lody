@@ -465,6 +465,12 @@ export function useCodeCollabSessionFileProvider(
           { sessionId, path },
           { ownerSessionId }
         ),
+      listIgnored: async (path) =>
+        await runtime.requestCodeCollabListIgnored(
+          machineId,
+          { sessionId, path },
+          { ownerSessionId }
+        ),
       lspDefinition: async (path, position) =>
         await runtime.requestCodeCollabLspDefinition(
           machineId,

@@ -29,6 +29,7 @@ import {
   type IosSimulatorCommand,
   type IosSimulatorResponse,
   machineSupportsSessionHistoryProtocol,
+  machineSupportsCodeCollabIgnoredEntries,
   type MachineProtocolCapabilities,
   type AgentConfigId,
   type CodeCollabV2Error,
@@ -36,6 +37,8 @@ import {
   type CodeCollabV2FileIndexSnapshot,
   type CodeCollabV2InitDirectoryOk,
   type CodeCollabV2InitDirectoryRequest,
+  type CodeCollabV2ListIgnoredOk,
+  type CodeCollabV2ListIgnoredRequest,
   type CodeCollabV2LspUnsupported,
   type CodeCollabV2OpenAllChangesDiffRequest,
   type CodeCollabV2OpenAllChangesDiffResponse,
@@ -539,6 +542,41 @@ export function createWorkspaceMachineRpcFacade(deps: WorkspaceMachineRpcFacadeD
           timeoutMs: options?.timeoutMs ?? 30_000,
         })
     );
+
+  // Gated before any I/O: an older daemon would drop the unknown method and leave the
+  // viewer waiting for the full request timeout.
+  const requestCodeCollabListIgnored = async (
+    machineId: MachineId,
+    request: CodeCollabV2ListIgnoredRequest,
+    options?: CodeCollabRequestOptions
+  ): Promise<CodeCollabV2ListIgnoredOk | CodeCollabV2Error | null> => {
+    const protocolCapabilities = await deps.getMachineProtocolCapabilities(machineId);
+    if (!machineSupportsCodeCollabIgnoredEntries({ protocolCapabilities })) {
+      return {
+        status: 'error',
+        code: 'transient_io',
+        message: 'This machine cannot list ignored files. Update the machine.',
+        retryable: false,
+      };
+    }
+    return await requestCodeCollab(
+      machineId,
+      {
+        machineId,
+        workspaceId,
+        method: 'code-collab/list-ignored',
+        params: request,
+        ...ownerSessionFields(options),
+        timeoutMs: options?.timeoutMs ?? 30_000,
+      },
+      async (client) =>
+        await client.requestCodeCollabListIgnored({
+          ...request,
+          ownerSessionId: options?.ownerSessionId,
+          timeoutMs: options?.timeoutMs ?? 30_000,
+        })
+    );
+  };
 
   const requestCodeCollabLspDefinition = (
     machineId: MachineId,
@@ -1588,6 +1626,7 @@ export function createWorkspaceMachineRpcFacade(deps: WorkspaceMachineRpcFacadeD
     requestCodeCollabOpenAllChangesDiff,
     requestCodeCollabOpenTurnDiff,
     requestCodeCollabInitDirectory,
+    requestCodeCollabListIgnored,
     requestCodeCollabLspDefinition,
     requestCodeCollabLspReferences,
     requestSessionPreviewCreate,

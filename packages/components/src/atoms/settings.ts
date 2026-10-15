@@ -208,6 +208,13 @@ export const electronSessionCompletionNotificationsEnabledAtom = atomWithStorage
 // mount via the viewer reading this atom directly.
 export const fileViewerWordWrapAtom = atomWithStorage<boolean>('lody-file-viewer-word-wrap', true);
 
+// Files tree: hide names the shared index leaves out (Git-ignored). Defaults on, the
+// tree as it has always been; turning it off reads them per viewer, on demand.
+export const fileTreeHideIgnoredFilesAtom = atomWithStorage<boolean>(
+  'lody-file-tree-hide-ignored',
+  true
+);
+
 // Mobile composer keyboard return key behavior.
 export const mobileKeyboardActionAtom = atomWithStorage<MobileKeyboardAction>(
   'lody-mobile-keyboard-action',

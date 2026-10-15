@@ -534,6 +534,27 @@ export const CodeCollabV2FileTreeStateSchema = z.record(
 );
 export type CodeCollabV2FileTreeState = z.infer<typeof CodeCollabV2FileTreeStateSchema>;
 
+// Per-viewer listing of names the scan excluded (Git ignore rules). It never enters
+// owner state or the shared file-index Flock, so ignored names reach only the viewer
+// that asked. `path` is a workspace-relative directory; the root is `.`.
+export const CodeCollabV2ListIgnoredRequestSchema = z
+  .object({
+    sessionId: z.string().trim().min(1),
+    path: z.string().min(1),
+  })
+  .strict();
+export type CodeCollabV2ListIgnoredRequest = z.infer<typeof CodeCollabV2ListIgnoredRequestSchema>;
+
+export const CodeCollabV2ListIgnoredOkSchema = z
+  .object({
+    status: z.literal('ok'),
+    path: z.string().min(1),
+    entries: CodeCollabV2FileTreeStateSchema,
+    truncated: z.boolean(),
+  })
+  .strict();
+export type CodeCollabV2ListIgnoredOk = z.infer<typeof CodeCollabV2ListIgnoredOkSchema>;
+
 export const CodeCollabV2AllChangesValueSchema = z.union([
   z.literal(true),
   z
@@ -1143,6 +1164,7 @@ export const CodeCollabV2RpcResponseSchema = z.union([
   CodeCollabV2OpenAllChangesDiffResponseSchema,
   CodeCollabV2OpenTurnDiffResponseSchema,
   CodeCollabV2InitDirectoryOkSchema,
+  CodeCollabV2ListIgnoredOkSchema,
   CodeCollabV2LspUnsupportedSchema,
 ]);
 export type CodeCollabV2RpcResponse = z.infer<typeof CodeCollabV2RpcResponseSchema>;

@@ -15,6 +15,8 @@ import {
   CodeCollabV2FileIndexSnapshotSchema,
   CodeCollabV2InitDirectoryOkSchema,
   CodeCollabV2InitDirectoryRequestSchema,
+  CodeCollabV2ListIgnoredOkSchema,
+  CodeCollabV2ListIgnoredRequestSchema,
   CodeCollabV2LspUnsupportedSchema,
   CodeCollabV2OpenAllChangesDiffRequestSchema,
   CodeCollabV2OpenAllChangesDiffResponseSchema,
@@ -176,6 +178,10 @@ export const LocalMachineRpcRequestSchema = z.discriminatedUnion('method', [
   BaseLocalMachineRpcRequestSchema.extend({
     method: z.literal('code-collab/init-directory'),
     params: CodeCollabV2InitDirectoryRequestSchema,
+  }).strict(),
+  BaseLocalMachineRpcRequestSchema.extend({
+    method: z.literal('code-collab/list-ignored'),
+    params: CodeCollabV2ListIgnoredRequestSchema,
   }).strict(),
   BaseLocalMachineRpcRequestSchema.extend({
     method: z.literal('code-collab/lsp-definition'),
@@ -362,6 +368,7 @@ export const LocalMachineRpcResultSchema = z.union([
   CodeCollabV2OpenAllChangesDiffResponseSchema,
   CodeCollabV2OpenTurnDiffResponseSchema,
   CodeCollabV2InitDirectoryOkSchema,
+  CodeCollabV2ListIgnoredOkSchema,
   CodeCollabV2LspUnsupportedSchema,
   CodeCollabV2ErrorSchema,
   FilePreviewV3ResponseSchema,

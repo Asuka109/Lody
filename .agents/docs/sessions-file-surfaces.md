@@ -123,6 +123,12 @@ this page is the full text of the rules summarised there.
   `data-native-selection-allow`.
 - v2 semantics for file tree, All Changes, refresh/save conflicts, and CLI-local
   turn diff RPC: `specs/code-collab-v2.md`.
+- The Files tree's eye toggle (`fileTreeHideIgnoredFilesAtom`, default hide) overlays
+  Git-ignored names read per viewer through `code-collab/list-ignored`, gated on
+  `codeCollabIgnoredEntries`. They never enter the shared file index, so search, quick
+  open, `@` mentions and All Changes stay index-only. `mergeIgnoredFileTreeEntries` lets
+  indexed paths win and dims ignored rows; an ignored lazy directory loads through the
+  overlay, never `initializeDirectory`. [Decision](../notes/implemented/feature/2026-10-15-file-tree-ignored-files.md).
 - DOCX, XLSX, and PPTX enter through the static `SessionFileOfficePreview` shell.
   An active preview schedules a bounded read at idle and then imports only that
   format's renderer and worker-backed engine. The local resource URL is read

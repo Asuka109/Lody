@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CURRENT_MACHINE_PROTOCOL_CAPABILITIES,
   type MachineId,
+  type MachineProtocolCapabilities,
   type McpServerId,
   type SessionId,
   type WorkspaceId,
@@ -783,3 +784,50 @@ it.each([{ operationInbox: 1 }, {}])(
     ]);
   }
 );
+
+describe('ignored-file listing', () => {
+  const listingFacade = (protocolCapabilities: MachineProtocolCapabilities | undefined) =>
+    createWorkspaceMachineRpcFacade({
+      workspaceId,
+      getMachineProtocolCapabilities: async () => protocolCapabilities,
+      targetRouter: {
+        getPlaneForMachine: () => 'cloud',
+        resolvePlaneForMachine: async () => 'cloud',
+      },
+      getMachineRpcClient: async () =>
+        ({
+          requestCodeCollabListIgnored: async (input: { path: string }) => ({
+            status: 'ok',
+            path: input.path,
+            entries: {},
+            truncated: false,
+          }),
+        }) as never,
+    });
+
+  it.each([undefined, {}, { codeCollabIgnoredEntries: 0 }])(
+    'fails fast, before any Machine RPC, on a machine without the capability (%j)',
+    async (protocolCapabilities) => {
+      await expect(
+        listingFacade(protocolCapabilities).requestCodeCollabListIgnored(remoteMachineId, {
+          sessionId,
+          path: '.',
+        })
+      ).resolves.toEqual({
+        status: 'error',
+        code: 'transient_io',
+        message: 'This machine cannot list ignored files. Update the machine.',
+        retryable: false,
+      });
+    }
+  );
+
+  it('lists on a capable machine', async () => {
+    await expect(
+      listingFacade(CURRENT_MACHINE_PROTOCOL_CAPABILITIES).requestCodeCollabListIgnored(
+        remoteMachineId,
+        { sessionId, path: '.' }
+      )
+    ).resolves.toEqual({ status: 'ok', path: '.', entries: {}, truncated: false });
+  });
+});

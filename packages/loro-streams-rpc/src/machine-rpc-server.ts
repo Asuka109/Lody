@@ -11,6 +11,8 @@ import type {
   CodeCollabV2InitDirectoryOk,
   CodeCollabV2InitDirectoryRequest,
   CodeCollabV2Error,
+  CodeCollabV2ListIgnoredOk,
+  CodeCollabV2ListIgnoredRequest,
   CodeCollabV2LspUnsupported,
   CodeCollabV2OpenAllChangesDiffRequest,
   CodeCollabV2OpenAllChangesDiffResponse,
@@ -74,6 +76,7 @@ import {
   CodeCollabV2ErrorCodeSchema,
   normalizeSessionTurnInputConfig,
   CodeCollabV2InitDirectoryRequestSchema,
+  CodeCollabV2ListIgnoredRequestSchema,
   CodeCollabV2OpenAllChangesDiffRequestSchema,
   CodeCollabV2OpenCurrentDiffRequestSchema,
   CodeCollabV2OpenTextRequestSchema,
@@ -489,6 +492,9 @@ type RpcServerDeps = {
   initCodeCollabDirectory?: (
     args: CodeCollabV2InitDirectoryRequest
   ) => Promise<CodeCollabV2InitDirectoryOk>;
+  listCodeCollabIgnored?: (
+    args: CodeCollabV2ListIgnoredRequest
+  ) => Promise<CodeCollabV2ListIgnoredOk>;
   getCodeCollabLspDefinition?: (args: {
     sessionId: SessionId;
     path: string;
@@ -1641,6 +1647,27 @@ export class LoroStreamsMachineRpcServer {
           });
           return;
         }
+        case 'code-collab/list-ignored': {
+          const decoded = await this.decryptCodeCollabV2RequestParams(request.params);
+          codeCollabOwnerSessionId = decoded.ownerSessionId;
+          const params = CodeCollabV2ListIgnoredRequestSchema.parse(decoded.payload);
+          await this.verifyCodeCollabV2OwnerSession(decoded.ownerSessionId, params.sessionId);
+          if (!this.deps.listCodeCollabIgnored) {
+            await this.appendErrorResponse(request.replyTo, request.id, request.method, {
+              code: LORO_STREAMS_RPC_ERROR_CODES.methodUnavailable,
+              message: 'Code Collab list-ignored is not available on this machine.',
+            });
+            return;
+          }
+          const response = await this.deps.listCodeCollabIgnored({
+            sessionId: params.sessionId as SessionId,
+            path: params.path,
+          });
+          await this.appendResultResponse(request.replyTo, request.id, request.method, response, {
+            codeCollabOwnerSessionId: decoded.ownerSessionId,
+          });
+          return;
+        }
         case 'code-collab/lsp-definition': {
           const decoded = await this.decryptCodeCollabV2RequestParams(request.params);
           codeCollabOwnerSessionId = decoded.ownerSessionId;
@@ -2002,6 +2029,7 @@ export class LoroStreamsMachineRpcServer {
       | CodeCollabV2OpenAllChangesDiffResponse
       | CodeCollabV2OpenTurnDiffResponse
       | CodeCollabV2InitDirectoryOk
+      | CodeCollabV2ListIgnoredOk
       | CodeCollabV2LspUnsupported
       | FilePreviewV3Response
       | SessionPreviewCreateResponse

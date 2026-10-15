@@ -11,6 +11,7 @@ import {
   type CodeCollabV2FileDigest,
   type CodeCollabV2FileTreeState,
   type CodeCollabV2FileTreeValue,
+  type CodeCollabV2ListIgnoredOk,
   type CodeCollabV2LspUnsupported,
   type CodeCollabV2OpenAllChangesDiffResponse,
   type CodeCollabV2OpenCurrentDiffResponse,
@@ -25,6 +26,7 @@ import {
   type SessionId,
 } from '@lody/shared';
 import { SaveTextConflictError, SaveTextTransientError } from './code-collab-save-errors';
+import type { FileWorkspaceIgnoredEntries } from './file-workspace-provider';
 import type {
   SessionFileAllChangesDiffEntry,
   SessionFileAllChangesDiffResult,
@@ -80,6 +82,7 @@ export type CodeCollabSessionFileProviderRuntime = {
     turnId: string
   ): Promise<CodeCollabV2OpenTurnDiffResponse | CodeCollabV2Error | null>;
   initDirectory(path: string): Promise<{ readonly status: 'ok' } | CodeCollabV2Error | null>;
+  listIgnored(path: string): Promise<CodeCollabV2ListIgnoredOk | CodeCollabV2Error | null>;
   lspDefinition(
     path: string,
     position: { readonly line: number; readonly character: number }
@@ -499,6 +502,24 @@ export class CodeCollabSessionFileProvider implements SessionFileProvider {
     if (isCodeCollabV2Error(response)) {
       throw new Error(response.message ?? response.code);
     }
+  }
+
+  async listIgnoredEntries(directoryPath: string): Promise<FileWorkspaceIgnoredEntries> {
+    if (!this.runtime) {
+      throw new Error(this.message ?? CODE_COLLAB_V2_UNAVAILABLE_MESSAGE);
+    }
+    // The machine names the workspace root `.`, the tree names it `''`.
+    const response = await this.runtime.listIgnored(directoryPath || '.');
+    if (!response) {
+      throw new Error('Ignored file listing timed out.');
+    }
+    if (isCodeCollabV2Error(response)) {
+      throw new Error(response.message ?? response.code);
+    }
+    return {
+      entries: codeCollabFileTreeToSessionFileEntries(response.entries, this.sourceState),
+      truncated: response.truncated,
+    };
   }
 
   async checkTextChanged(pathOrFileId: string): Promise<CodeCollabTextChangeCheckResult> {
