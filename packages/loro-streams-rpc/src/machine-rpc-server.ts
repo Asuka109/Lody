@@ -86,6 +86,11 @@ import {
   filePreviewV3Error,
   type FilePreviewV3Request,
   type FilePreviewV3Response,
+  FileReadRangeRequestSchema,
+  FileReadRangeErrorCodeSchema,
+  fileReadRangeError,
+  type FileReadRangeRequest,
+  type FileReadRangeResponse,
 } from '@lody/shared';
 import {
   CodeCollabV2LspRpcParamsSchema,
@@ -307,6 +312,24 @@ const toFilePreviewRpcError = (
   };
 };
 
+/** `toFilePreviewRpcError` for File Read Range v1. */
+const toFileReadRangeRpcError = (
+  error: unknown,
+  message: string
+): { code: string; message: string; data?: unknown } => {
+  const rawCode =
+    typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
+      ? error.code
+      : undefined;
+  const parsed = rawCode ? FileReadRangeErrorCodeSchema.safeParse(rawCode) : undefined;
+  const code = parsed?.success ? parsed.data : 'transient_io';
+  return {
+    code,
+    message,
+    data: fileReadRangeError(code, { message, retryable: code === 'transient_io' }),
+  };
+};
+
 const codeCollabOwnerMismatchError = (): Error & {
   code: 'permission_denied';
   toRpcError: () => CodeCollabV2Error;
@@ -473,6 +496,8 @@ type RpcServerDeps = {
   resolveCodeCollabOwnerSessionId?: (sessionId: SessionId) => Promise<SessionId>;
   /** File Preview v3 — a plain read; must not activate Code Collab. */
   previewFile?: (args: FilePreviewV3Request) => Promise<FilePreviewV3Response>;
+  /** File Read Range v1 — a plain bounded read; must not activate Code Collab. */
+  readFileRange?: (args: FileReadRangeRequest) => Promise<FileReadRangeResponse>;
   refreshCodeCollabText?: (
     args: CodeCollabV2RefreshTextRequest
   ) => Promise<CodeCollabV2RefreshTextResponse>;
@@ -1706,6 +1731,24 @@ export class LoroStreamsMachineRpcServer {
           });
           return;
         }
+        case 'file/read-range': {
+          const decoded = await this.decryptCodeCollabV2RequestParams(request.params);
+          codeCollabOwnerSessionId = decoded.ownerSessionId;
+          const params = FileReadRangeRequestSchema.parse(decoded.payload);
+          // The same owner binding as `file/preview`: a range read is a preview
+          // read in pieces and must not reach another session's workspace.
+          await this.verifyCodeCollabV2OwnerSession(decoded.ownerSessionId, params.sessionId);
+          const response: FileReadRangeResponse = this.deps.readFileRange
+            ? await this.deps.readFileRange(params)
+            : fileReadRangeError('transient_io', {
+                message: 'File download is not available on this machine.',
+                path: params.path,
+              });
+          await this.appendResultResponse(request.replyTo, request.id, request.method, response, {
+            codeCollabOwnerSessionId: decoded.ownerSessionId,
+          });
+          return;
+        }
         case 'session/preview-create': {
           if (!this.deps.createSessionPreview) {
             await this.appendErrorResponse(request.replyTo, request.id, request.method, {
@@ -1864,7 +1907,9 @@ export class LoroStreamsMachineRpcServer {
         ? toCodeCollabRpcError(failure)
         : request.method === 'file/preview'
           ? toFilePreviewRpcError(failure, message)
-          : null;
+          : request.method === 'file/read-range'
+            ? toFileReadRangeRpcError(failure, message)
+            : null;
       await this.appendErrorResponse(
         request.replyTo,
         request.id,
@@ -2004,6 +2049,7 @@ export class LoroStreamsMachineRpcServer {
       | CodeCollabV2InitDirectoryOk
       | CodeCollabV2LspUnsupported
       | FilePreviewV3Response
+      | FileReadRangeResponse
       | SessionPreviewCreateResponse
       | SessionPreviewRevokeResponse
       | SessionPreviewStatusResponse

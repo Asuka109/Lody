@@ -5,8 +5,13 @@
  * the only way to get at it.
  */
 export function downloadBytesAsFile(filePath: string, bytes: Uint8Array): void {
+  downloadPartsAsFile(filePath, [bytes]);
+}
+
+/** `downloadBytesAsFile` for a file that arrived in ranges; the parts are not copied. */
+export function downloadPartsAsFile(filePath: string, parts: readonly Uint8Array[]): void {
   if (typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') return;
-  const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/octet-stream' });
+  const blob = new Blob(parts as unknown as BlobPart[], { type: 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
   try {
     const anchor = document.createElement('a');

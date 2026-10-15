@@ -1,6 +1,6 @@
 import type { CodeCollabContentUnavailableReason } from '@lody/shared';
 import * as stylex from '@stylexjs/stylex';
-import { Copy, ExternalLink, FolderOpen, Loader2, Share2 } from 'lucide-react';
+import { Copy, Download, ExternalLink, FolderOpen, Loader2, Share2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 // The action model is shared with the file tree context menu and the side
 // panel ⋯ menu; the card is one consumer of it, not its owner.
@@ -380,6 +380,25 @@ export function SessionFileNoticeCard({
         <p {...stylex.props(styles.description)}>{presentation.description}</p>
         {actions ? (
           <div {...stylex.props(styles.actions)}>
+            {/* The way out leads: download, share, or open on the host — never
+                two of them at once — and Copy file path trails it. */}
+            {actions.onDownload ? (
+              <Button
+                size="small"
+                variant="secondary"
+                className={ACTION_BUTTON_CLASS}
+                onClick={actions.onDownload}
+                disabled={actions.downloading}
+                data-testid="session-file-error-download"
+              >
+                {actions.downloading ? (
+                  <Loader2 {...stylex.props(styles.spinner)} aria-hidden="true" />
+                ) : (
+                  <Download {...stylex.props(styles.actionIcon)} aria-hidden="true" />
+                )}
+                {t('sessions.fileActions.download', 'Download file')}
+              </Button>
+            ) : null}
             {actions.onShare ? (
               <Button
                 size="small"
@@ -424,9 +443,9 @@ export function SessionFileNoticeCard({
             ) : null}
             <Button
               size="small"
-              // Without the local-host pair this is the only way out of the
-              // card, so it leads instead of trailing them.
-              variant={localHost || actions.onShare ? 'ghost' : 'secondary'}
+              // Only when nothing else gets the file out of the card is this the
+              // way out; otherwise that action stands up and this one recedes.
+              variant={localHost || actions.onShare || actions.onDownload ? 'ghost' : 'secondary'}
               className={ACTION_BUTTON_CLASS}
               onClick={actions.onCopyPath}
               data-testid="session-file-error-copy-path"

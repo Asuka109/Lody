@@ -7,6 +7,7 @@ import {
   MACHINE_PROTOCOL_CAPABILITIES,
   machineSupportsAcpAuthenticationInteractionsProtocol,
   machineSupportsAcpCapabilityRefreshCacheProtocol,
+  machineSupportsFileReadRangeProtocol,
   machineSupportsLocalFileResourcesProtocol,
   machineSupportsProtocolCapability,
   machineSupportsSubagentEvents,
@@ -110,6 +111,16 @@ it('requires an advertised local file resource protocol, independent of release 
   ).toBe(false);
   expect(
     machineSupportsLocalFileResourcesProtocol({
+      protocolCapabilities: CURRENT_MACHINE_PROTOCOL_CAPABILITIES,
+    })
+  ).toBe(true);
+});
+
+it('requires an advertised file read range protocol before offering ranged downloads', () => {
+  expect(machineSupportsFileReadRangeProtocol(undefined)).toBe(false);
+  expect(machineSupportsFileReadRangeProtocol({ protocolCapabilities: {} })).toBe(false);
+  expect(
+    machineSupportsFileReadRangeProtocol({
       protocolCapabilities: CURRENT_MACHINE_PROTOCOL_CAPABILITIES,
     })
   ).toBe(true);

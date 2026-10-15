@@ -107,8 +107,8 @@ and the `file/preview` namespace are in
   `permission_denied` and must not call the file operation.
 - Session-scoped Code Collab RPC methods are not part of this transport. Add v2 work
   under the ordinary `code-collab/*` machine methods.
-- `file/preview` (File Preview v3) is a Machine RPC method OUTSIDE the `code-collab/`
-  namespace, on purpose: previewing a file must not activate Code Collab on the
-  machine. It reuses the same owner-session content envelope and the same owner
+- `file/preview` and `file/read-range` are Machine RPC methods OUTSIDE the `code-collab/`
+  namespace, on purpose: reading a file must not activate Code Collab on the
+  machine. Both reuse the same owner-session content envelope and the same owner
   verification. Every encrypt/decrypt/error-decode site must go through
   `isOwnerScopedEncryptedRpcMethod`.

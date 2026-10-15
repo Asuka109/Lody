@@ -5,7 +5,7 @@ import path from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { FILE_PREVIEW_V3_LIMITS, type SessionId } from '@lody/shared';
+import { FILE_PREVIEW_V3_LIMITS, FILE_READ_RANGE_LIMITS, type SessionId } from '@lody/shared';
 import { FilePreviewService, type FilePreviewWorkspaceResolver } from './file-preview-service';
 
 const SESSION_ID = 'session-preview' as SessionId;
@@ -55,6 +55,7 @@ function createService(args: {
   readonly workspaceRoot: string;
   readonly extraRoots?: readonly string[];
   readonly limits?: Partial<typeof FILE_PREVIEW_V3_LIMITS>;
+  readonly readRangeLimits?: Partial<typeof FILE_READ_RANGE_LIMITS>;
 }): FilePreviewService {
   const resolveWorkspace: FilePreviewWorkspaceResolver = async () => ({
     ok: true,
@@ -66,6 +67,7 @@ function createService(args: {
     resolveLocalWorkspace: resolveWorkspace,
     extraRoots: args.extraRoots ?? [],
     ...(args.limits === undefined ? {} : { limits: args.limits }),
+    ...(args.readRangeLimits === undefined ? {} : { readRangeLimits: args.readRangeLimits }),
   });
 }
 
@@ -553,5 +555,117 @@ describe('FilePreviewService', () => {
     const response = await service.previewFile({ v: 3, sessionId: SESSION_ID, path: 'a.ts' });
 
     expect(response).toMatchObject({ status: 'error', code: 'session_not_found' });
+  });
+});
+
+describe('FilePreviewService.readFileRange', () => {
+  it('serves a file in bounded ranges that reassemble to its exact bytes', async () => {
+    const workspaceRoot = await makeDir('range-ws-');
+    const bytes = Buffer.from([0, 1, 2, 3, 250, 251, 252, 253, 254, 255]);
+    await writeFile(path.join(workspaceRoot, 'video.mp4'), bytes);
+    const service = createService({ workspaceRoot, readRangeLimits: { maxChunkBytes: 4 } });
+
+    const received: Buffer[] = [];
+    let offset = 0;
+    let revision: string | undefined;
+    for (;;) {
+      const response = await service.readFileRange({
+        v: 1,
+        sessionId: SESSION_ID,
+        path: 'video.mp4',
+        offset,
+        length: 1024,
+        ...(revision === undefined ? {} : { revision }),
+      });
+      if (response.status !== 'ok') throw new Error(`unexpected ${response.code}`);
+      expect(response).toMatchObject({ path: 'video.mp4', sizeBytes: 10, offset });
+      // The machine clamps the requested length to its own chunk ceiling.
+      expect(response.rawBytes).toBe(Math.min(4, 10 - offset));
+      revision ??= response.revision;
+      expect(response.revision).toBe(revision);
+      received.push(Buffer.from(response.data, 'base64'));
+      offset += response.rawBytes;
+      if (offset === response.sizeBytes) break;
+    }
+
+    expect(Buffer.concat(received)).toEqual(bytes);
+  });
+
+  it('answers file_changed once the file is rewritten between ranges', async () => {
+    const workspaceRoot = await makeDir('range-ws-');
+    const filePath = path.join(workspaceRoot, 'log.txt');
+    await writeFile(filePath, 'first version');
+    const service = createService({ workspaceRoot, readRangeLimits: { maxChunkBytes: 5 } });
+
+    const first = await service.readFileRange({
+      v: 1,
+      sessionId: SESSION_ID,
+      path: 'log.txt',
+      offset: 0,
+      length: 5,
+    });
+    if (first.status !== 'ok') throw new Error('expected the first range');
+    await writeFile(filePath, 'second, longer version');
+
+    const second = await service.readFileRange({
+      v: 1,
+      sessionId: SESSION_ID,
+      path: 'log.txt',
+      offset: 5,
+      length: 5,
+      revision: first.revision,
+    });
+
+    expect(second).toMatchObject({ status: 'error', code: 'file_changed' });
+  });
+
+  it('refuses a file over the download ceiling with its real numbers', async () => {
+    const workspaceRoot = await makeDir('range-ws-');
+    await writeFile(path.join(workspaceRoot, 'huge.bin'), Buffer.alloc(32));
+    const service = createService({ workspaceRoot, readRangeLimits: { maxFileBytes: 16 } });
+
+    const response = await service.readFileRange({
+      v: 1,
+      sessionId: SESSION_ID,
+      path: 'huge.bin',
+      offset: 0,
+      length: 8,
+    });
+
+    expect(response).toMatchObject({
+      status: 'error',
+      code: 'too_large',
+      sizeBytes: 32,
+      limitBytes: 16,
+    });
+  });
+
+  it('keeps the remote preview boundary: no path outside every allowed root', async () => {
+    const workspaceRoot = await makeDir('range-ws-');
+    const outside = await makeDir('range-outside-');
+    await writeFile(path.join(outside, 'secret.txt'), 'secret');
+    const service = createService({ workspaceRoot });
+
+    const response = await service.readFileRange({
+      v: 1,
+      sessionId: SESSION_ID,
+      path: path.join(outside, 'secret.txt'),
+      offset: 0,
+      length: 8,
+    });
+
+    expect(response).toMatchObject({ status: 'error', code: 'path_not_allowed' });
+    expect(response.status === 'ok' ? response.data : undefined).toBeUndefined();
+  });
+
+  it('serves an empty file and rejects a range past the end', async () => {
+    const workspaceRoot = await makeDir('range-ws-');
+    await writeFile(path.join(workspaceRoot, 'empty.txt'), '');
+    const service = createService({ workspaceRoot });
+    const read = (offset: number) =>
+      service.readFileRange({ v: 1, sessionId: SESSION_ID, path: 'empty.txt', offset, length: 8 });
+
+    expect(await read(0)).toMatchObject({ status: 'ok', sizeBytes: 0, rawBytes: 0, data: '' });
+    expect(await read(1)).toMatchObject({ status: 'error', code: 'invalid_range' });
   });
 });

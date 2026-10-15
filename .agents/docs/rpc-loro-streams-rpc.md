@@ -106,3 +106,9 @@ content, so it reuses the owner-session content envelope and owner verification.
 The earlier `method.startsWith('code-collab/')` checks silently excluded any new
 envelope method, which is why every encrypt/decrypt/error-decode site now goes
 through `isOwnerScopedEncryptedRpcMethod`.
+
+`file/read-range` is the same kind of method for downloads: one bounded byte
+range of a file the preview refuses, with the same envelope, owner verification
+and remote path policy. It is a separate method rather than a larger preview
+budget because one Machine RPC response has a gateway ceiling this repository
+does not assert; clients send it only to machines advertising `fileReadRange`.

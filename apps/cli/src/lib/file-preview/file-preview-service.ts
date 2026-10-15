@@ -1,12 +1,16 @@
 import type { LocalFileResolution } from '@lody/shared/local-file-preview';
 import { createHash } from 'node:crypto';
-import { open } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
+import type { BigIntStats } from 'node:fs';
 import { promisify } from 'node:util';
 import { gzip } from 'node:zlib';
 import {
   FILE_PREVIEW_PROTOCOL_VERSION,
   FILE_PREVIEW_V3_LIMITS,
+  FILE_READ_RANGE_LIMITS,
+  FILE_READ_RANGE_PROTOCOL_VERSION,
   filePreviewV3Error,
+  fileReadRangeError,
   getImageMimeTypeForPath,
   isBinaryImagePath,
   type FilePreviewV3Content,
@@ -15,6 +19,9 @@ import {
   type FilePreviewV3Request,
   type FilePreviewV3Response,
   type FilePreviewV3TextFormat,
+  type FileReadRangeErrorCode,
+  type FileReadRangeRequest,
+  type FileReadRangeResponse,
   type SessionId,
 } from '@lody/shared';
 import { formatErrorMessage } from '@/utils/format-error';
@@ -61,6 +68,7 @@ export type FilePreviewServiceOptions = {
   readonly resolveWorkspace: FilePreviewWorkspaceResolver;
   readonly resolveLocalWorkspace: FilePreviewLocalWorkspaceResolver;
   readonly limits?: Partial<typeof FILE_PREVIEW_V3_LIMITS>;
+  readonly readRangeLimits?: Partial<typeof FILE_READ_RANGE_LIMITS>;
   readonly pathPolicy?: FilePreviewPathPolicyOptions;
   /** Test seam: overrides the fixed extra roots entirely. */
   readonly extraRoots?: readonly string[];
@@ -78,9 +86,11 @@ export type FilePreviewServiceOptions = {
  */
 export class FilePreviewService {
   private readonly limits: typeof FILE_PREVIEW_V3_LIMITS;
+  private readonly readRangeLimits: typeof FILE_READ_RANGE_LIMITS;
 
   constructor(private readonly deps: FilePreviewServiceOptions) {
     this.limits = { ...FILE_PREVIEW_V3_LIMITS, ...deps.limits };
+    this.readRangeLimits = { ...FILE_READ_RANGE_LIMITS, ...deps.readRangeLimits };
   }
 
   /** Local IPC resolves identity; Electron owns content IO and resource lifetime. */
@@ -252,6 +262,119 @@ export class FilePreviewService {
     };
   }
 
+  /**
+   * File Read Range v1: one bounded byte range of a file, for the downloads a
+   * preview refuses as too large. It authorizes exactly like a remote preview —
+   * same workspace resolver, same path policy, never the local arbitrary-path
+   * mode — and every range is re-authorized, so a chunk cannot outlive a
+   * revoked path. Like a preview it never activates Code Collab.
+   */
+  async readFileRange(request: FileReadRangeRequest): Promise<FileReadRangeResponse> {
+    const limits = this.readRangeLimits;
+    const workspace = await this.deps.resolveWorkspace(request.sessionId as SessionId);
+    if (!workspace.ok) {
+      return fileReadRangeError(workspace.code, {
+        message: workspace.message,
+        path: request.path,
+        retryable: workspace.code === 'transient_io' || workspace.code === 'machine_offline',
+      });
+    }
+
+    const resolution = resolveFilePreviewPath({
+      workspaceRoot: workspace.workspaceRoot,
+      requestedPath: request.path,
+      ...(this.deps.extraRoots === undefined ? {} : { extraRoots: this.deps.extraRoots }),
+      options: {
+        ...this.deps.pathPolicy,
+      },
+    });
+    if (!resolution.ok) {
+      return fileReadRangeError(resolution.rejection.code, {
+        message: resolution.rejection.message,
+        path: request.path,
+        retryable: resolution.rejection.code === 'transient_io',
+      });
+    }
+
+    const resolved = resolution.resolved;
+    let handle: FileHandle;
+    try {
+      handle = await open(resolved.absolutePath, 'r');
+    } catch (error) {
+      return readRangeIoError(error, resolved.reportedPath);
+    }
+    try {
+      const before = await handle.stat({ bigint: true });
+      if (!before.isFile()) {
+        return fileReadRangeError('not_a_file', {
+          message: 'Path is not a regular file.',
+          path: resolved.reportedPath,
+        });
+      }
+      const revision = fileRevision(before);
+      if (request.revision !== undefined && request.revision !== revision) {
+        return fileReadRangeError('file_changed', {
+          message: 'File changed while it was being downloaded.',
+          path: resolved.reportedPath,
+        });
+      }
+      const sizeBytes = Number(before.size);
+      if (sizeBytes > limits.maxFileBytes) {
+        return fileReadRangeError('too_large', {
+          message: 'File is too large to download.',
+          path: resolved.reportedPath,
+          sizeBytes,
+          limitBytes: limits.maxFileBytes,
+        });
+      }
+      if (request.offset > sizeBytes) {
+        return fileReadRangeError('invalid_range', {
+          message: 'Range starts past the end of the file.',
+          path: resolved.reportedPath,
+          sizeBytes,
+        });
+      }
+
+      const length = Math.min(request.length, limits.maxChunkBytes, sizeBytes - request.offset);
+      const buffer = Buffer.alloc(length);
+      let bytesRead = 0;
+      while (bytesRead < length) {
+        const result = await handle.read(
+          buffer,
+          bytesRead,
+          length - bytesRead,
+          request.offset + bytesRead
+        );
+        if (result.bytesRead === 0) break;
+        bytesRead += result.bytesRead;
+      }
+      // A write that lands during the read changes the revision; a truncation
+      // shortens it. Either way these bytes may straddle two versions.
+      if (bytesRead !== length || fileRevision(await handle.stat({ bigint: true })) !== revision) {
+        return fileReadRangeError('file_changed', {
+          message: 'File changed while it was being downloaded.',
+          path: resolved.reportedPath,
+        });
+      }
+
+      return {
+        status: 'ok',
+        v: FILE_READ_RANGE_PROTOCOL_VERSION,
+        path: resolved.reportedPath,
+        ...(resolved.external ? { external: true } : {}),
+        revision,
+        sizeBytes,
+        offset: request.offset,
+        data: buffer.toString('base64'),
+        rawBytes: length,
+      };
+    } catch (error) {
+      return readRangeIoError(error, resolved.reportedPath);
+    } finally {
+      await handle.close();
+    }
+  }
+
   private binaryOk(
     resolved: ResolvedPreviewPath,
     bytes: Uint8Array,
@@ -328,6 +451,34 @@ async function readFileWithinLimit(absolutePath: string, limitBytes: number): Pr
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * File identity plus content version. The inode catches a replaced file and the
+ * nanosecond mtime plus size catch a rewrite in place. Hashed so the wire value
+ * stays opaque to the client.
+ */
+function fileRevision(stats: BigIntStats): string {
+  return createHash('sha256')
+    .update(`${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeNs}`)
+    .digest('hex');
+}
+
+function readRangeIoError(error: unknown, reportedPath: string): FileReadRangeResponse {
+  const code = (error as NodeJS.ErrnoException).code;
+  const mapped: FileReadRangeErrorCode =
+    code === 'ENOENT' || code === 'ENOTDIR'
+      ? 'file_not_found'
+      : code === 'EACCES' || code === 'EPERM'
+        ? 'permission_denied'
+        : code === 'EISDIR'
+          ? 'not_a_file'
+          : 'transient_io';
+  return fileReadRangeError(mapped, {
+    message: mapped === 'transient_io' ? formatErrorMessage(error) : 'File could not be read.',
+    path: reportedPath,
+    ...(mapped === 'transient_io' ? { retryable: true } : {}),
+  });
 }
 
 function digestBytes(bytes: Uint8Array): FilePreviewV3Digest {

@@ -75,6 +75,12 @@ save path's text reads.
   that response.** `file/resolve-local` returns the canonical absolute path after
   owner/path resolution; Electron owns bounded content reads and resource lifetime.
   Negotiate `localFileResources` through the central machine protocol binding.
+- `file/read-range` (`readFileRange`) is the download path for files a preview
+  refuses. It authorizes every range exactly like a remote preview (same resolver,
+  same remote path policy, never `allowArbitraryPaths`), clamps each range to
+  `FILE_READ_RANGE_LIMITS`, refuses files past `maxFileBytes`, and answers
+  `file_changed` when the revision (identity + size + mtime) moves before or during
+  a read. Never a partial or mixed-revision range.
 - `maxBinaryBytes` stays pinned to `SESSION_IMAGE_MAX_SIZE_BYTES`. Do not raise these
   budgets without measuring against the real gateway, since a non-404 4xx append
   failure is not retried.

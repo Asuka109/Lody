@@ -160,9 +160,9 @@ describe('SessionAgentFileLinkMenuProvider', () => {
     await closeContextMenu();
 
     const sideMenu = await openContextMenu(sideRegion);
-    expect(sideMenu.textContent).toBe('Copy Path');
+    expect(sideMenu.textContent).toBe('Copy file path');
     const copyPath = sideMenu.querySelector<HTMLElement>('[role="menuitem"]');
-    if (!copyPath) throw new Error('Copy Path action did not render');
+    if (!copyPath) throw new Error('Copy file path action did not render');
     await act(async () => {
       copyPath.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
       await Promise.resolve();

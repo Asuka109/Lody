@@ -62,16 +62,19 @@ export function resolveSessionFileActionAvailability({
   isLocalMachine,
   hasHostPath,
   hasFileProvider,
+  hasRangeDownload,
 }: {
   readonly isElectronRenderer: boolean;
   readonly isLocalMachine: boolean;
   readonly hasHostPath: boolean;
   readonly hasFileProvider: boolean;
+  /** The machine serves `file/read-range`, so any size up to its ceiling downloads. */
+  readonly hasRangeDownload: boolean;
 }): SessionFileActionAvailability {
   const localHost = isElectronRenderer && isLocalMachine && hasHostPath;
   // Download is deliberately the complement, not an everywhere action: with the
   // real file one keystroke away, a copy in ~/Downloads is a decoy.
-  return { localHost, download: !localHost && hasFileProvider };
+  return { localHost, download: !localHost && (hasFileProvider || hasRangeDownload) };
 }
 
 /**
@@ -90,11 +93,15 @@ export type SessionFileLocalHostActions = {
 /**
  * Ways out of a file Lody itself will not render. Copying the path is always
  * possible — every platform can put text on the clipboard. Native mobile may
- * additionally export complete bytes through the system share sheet.
+ * additionally export complete bytes through the system share sheet, and a
+ * remote machine that serves `file/read-range` lets any other client download
+ * the file however large the preview found it.
  */
 export type SessionFileErrorActions = {
   readonly onCopyPath: () => void;
   readonly onShare?: () => void;
   readonly sharing?: boolean;
+  readonly onDownload?: () => void;
+  readonly downloading?: boolean;
   readonly localHost?: SessionFileLocalHostActions;
 };

@@ -6,7 +6,9 @@ the reasoning behind those rules.
 ## Files
 
 - `file-preview-service.ts` — resolves the workspace, authorizes the path, reads,
-  classifies text vs binary, encodes, and answers.
+  classifies text vs binary, encodes, and answers. `readFileRange` serves
+  `file/read-range` for downloads: the same resolution and authorization, then
+  one bounded byte range stamped with the file's revision.
 - `file-preview-path-policy.ts` — the security boundary: allowed roots, symlink
   resolution, case/NFC-tolerant path resolution, and missing-path classification.
 - `file-preview-path-policy.test.ts` — exercises the fold walk through an injected
